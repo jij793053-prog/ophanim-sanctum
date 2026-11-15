@@ -1,0 +1,10 @@
+{
+  "_comment": "将本文件复制重命名为 ophanim_agent_backend.json 即可切换为非 Antigravity 外部 Agent 工作台后端（支持 python_bridge / cli_command / openai_compatible / http_relay 四种模式）",
+  "provider": "external",
+  "mode": "python_bridge",
+  "agentName": "DEEPSEEK HARNESS",
+  "bridgeScript": "custom_agent_bridge.py",
+  "baseUrl": "https://api.deepseek.com/v1",
+  "apiKeyEnv": "DEEPSEEK_API_KEY",
+  "defaultModel": "deepseek-chat"
+}
