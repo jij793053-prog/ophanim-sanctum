@@ -18,12 +18,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>OPHANIM UI</title>
-  <link rel="icon" href="ophanim_logo.ico" sizes="any" />
+  <title>OPHANIM TOY SANCTUM</title>
+  <script>if(window.location.search&&window.location.search.indexOf('wallpaper=1')!==-1){document.title='OPHANIM WALLPAPER';}</script>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 400' fill='none'%3E%3Ccircle cx='200' cy='200' r='198' fill='%2307070b'/%3E%3Ccircle cx='200' cy='200' r='190' stroke='%23f2f4fa' stroke-width='6.5'/%3E%3Ccircle cx='200' cy='200' r='176' stroke='%23c6cad6' stroke-width='3.5' stroke-dasharray='6 9'/%3E%3Ccircle cx='200' cy='200' r='144' stroke='%23f2f4fa' stroke-width='5.2'/%3E%3Ccircle cx='200' cy='200' r='96' stroke='%23c6cad6' stroke-width='3.8' stroke-dasharray='14 8'/%3E%3Cpath d='M200,14 Q212,188 386,200 Q212,212 200,386 Q188,212 14,200 Q188,188 200,14 Z' fill='%2307070b' fill-opacity='0.55' stroke='%23ffffff' stroke-width='5.5'/%3E%3Cpath d='M200,48 Q210,190 352,200 Q210,210 200,352 Q190,210 48,200 Q190,190 200,48 Z' transform='rotate(45 200 200)' stroke='%23dcdfe8' stroke-width='4.5'/%3E%3Ccircle cx='200' cy='200' r='46' fill='%2309090e' stroke='%23ffffff' stroke-width='6.2'/%3E%3Ccircle cx='200' cy='200' r='18' fill='%23f4f6fc'/%3E%3C/svg%3E" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Cardo:ital,wght@0,400;0,700;1,400&family=Cinzel+Decorative:wght@400;700&family=Cinzel:wght@400;600;700&family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400&family=Frank+Ruhl+Libre:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500;600&family=Noto+Serif+SC:wght@400;600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Cardo:ital,wght@0,400;0,700;1,400&family=Cinzel+Decorative:wght@400;700&family=Cinzel:wght@400;600;700&family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400&family=Frank+Ruhl+Libre:wght@300;400;500;600&family=JetBrains+Mono:wght@300;400;500;600&family=Noto+Serif+SC:wght@400;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <style>
     :root {
@@ -8424,29 +8424,49 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           }
         }
 
+        if (window.__ophanimToyWpPollTimer) {
+          clearInterval(window.__ophanimToyWpPollTimer);
+          window.__ophanimToyWpPollTimer = null;
+        }
+
         sendWpPost().then(onWpRes).catch(function () {
           if (activeLocalWS && activeLocalWS.readyState === 1) {
             activeLocalWS.send(JSON.stringify(reqBody));
             return;
           }
-          // Attempt automatic silent wake via registered `ophanim-toy-wp://` protocol (works if Ophanim_Wallpaper_Toy.bat ran once!)
+          // Attempt automatic silent wake via registered `ophanim-toy-wp://` protocol (works immediately if Ophanim_Wallpaper_Toy.bat ran once!)
           tryWakeToyWallpaperProtocol();
           let tries = 0;
-          const pollTimer = setInterval(function () {
+          let shownFirstRunGuide = false;
+          let inflight = false;
+          window.__ophanimToyWpPollTimer = setInterval(function () {
+            if (inflight) return;
             tries++;
-            fetch('http://127.0.0.1:18791/api/health', { method: 'GET' })
+            inflight = true;
+            fetch('http://127.0.0.1:18791/api/health', { method: 'GET', cache: 'no-store' })
               .then(function (r) { if (!r.ok) throw new Error('not up'); return r.json(); })
               .then(function () {
-                clearInterval(pollTimer);
-                sendWpPost().then(onWpRes).catch(function () {});
+                if (window.__ophanimToyWpPollTimer) {
+                  clearInterval(window.__ophanimToyWpPollTimer);
+                  window.__ophanimToyWpPollTimer = null;
+                }
+                showToast('WALLPAPER // 已连接本地壁纸宿主，正在嵌入桌面图标底层...');
+                return sendWpPost().then(onWpRes);
               })
               .catch(function () {
-                if (tries >= 9) {
-                  clearInterval(pollTimer);
-                  showToast('首次设为桌面壁纸请双击同目录「Ophanim_Wallpaper_Toy.bat」（零 Python / 零 Agent 依赖，运行一次后网页内直点即生效）');
+                if (tries === 18 && !shownFirstRunGuide) {
+                  shownFirstRunGuide = true;
+                  showToast('首次使用请双击一次同目录「Ophanim_Wallpaper_Toy.bat」（双击后当前配置会自动生效为壁纸，无需重点）');
                 }
+                if (tries >= 240 && window.__ophanimToyWpPollTimer) {
+                  clearInterval(window.__ophanimToyWpPollTimer);
+                  window.__ophanimToyWpPollTimer = null;
+                }
+              })
+              .finally(function () {
+                inflight = false;
               });
-          }, 360);
+          }, 380);
         });
       }
 

@@ -6,19 +6,19 @@ set "OPHANIM_BAT_ARG=%~1"
 start "" "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand JAByAGEAdwA9AFsAUwB5AHMAdABlAG0ALgBJAE8ALgBGAGkAbABlAF0AOgA6AFIAZQBhAGQAQQBsAGwAVABlAHgAdAAoACQAZQBuAHYAOgBPAFAASABBAE4ASQBNAF8AQgBBAFQAXwBTAEUATABGACwAWwBTAHkAcwB0AGUAbQAuAFQAZQB4AHQALgBFAG4AYwBvAGQAaQBuAGcAXQA6ADoAVQBUAEYAOAApADsAJABtAD0AJwAjACMAIwBPAFAASABBAE4ASQBNAF8AUABTAF8AQgBPAEQAWQAjACMAIwAnADsAJABpAD0AJAByAGEAdwAuAEkAbgBkAGUAeABPAGYAKAAkAG0AKQA7AGkAZgAoACQAaQAgAC0AZwBlACAAMAApAHsAJgAgACgAWwBzAGMAcgBpAHAAdABiAGwAbwBjAGsAXQA6ADoAQwByAGUAYQB0AGUAKAAkAHIAYQB3AC4AUwB1AGIAcwB0AHIAaQBuAGcAKAAkAGkAKwAkAG0ALgBMAGUAbgBnAHQAaAApACkAKQB9AA==
 exit /b 0
 ###OPHANIM_PS_BODY###
-
 $ErrorActionPreference = 'Stop'
-$RootDir = ($env:OPHANIM_BAT_DIR).TrimEnd('\', '/')
-$BatSelf = $env:OPHANIM_BAT_SELF
-$Arg0    = [string]$env:OPHANIM_BAT_ARG
+$RootDir  = ($env:OPHANIM_BAT_DIR).TrimEnd('\', '/')
+$BatSelf  = $env:OPHANIM_BAT_SELF
+$Arg0     = [string]$env:OPHANIM_BAT_ARG
 $HtmlFile = Join-Path $RootDir 'ophanim_toy_sanctum.html'
 $CacheDir = Join-Path $RootDir '.ophanim_toy_cache'
-$Port = 18791
+$Port     = 18791
 $HealthUrl = "http://127.0.0.1:$Port/api/health"
 $AppUrl    = "http://127.0.0.1:$Port/ophanim_toy_sanctum.html?ws=ws://127.0.0.1:$Port/ws"
 
-# 1. Register current-user URL protocol `ophanim-toy-wp://` (no Admin required) so clicking [设为壁纸]
-#    directly inside `file:///.../ophanim_toy_sanctum.html` can wake this native wallpaper host automatically!
+New-Item -ItemType Directory -Path $CacheDir -Force | Out-Null
+
+# 1. Register current-user URL protocol `ophanim-toy-wp://` (zero Admin required)
 try {
     if ($BatSelf -and (Test-Path -LiteralPath $BatSelf)) {
         $protoKey = 'HKCU:\Software\Classes\ophanim-toy-wp'
@@ -37,7 +37,7 @@ function Test-HostAlive {
     try {
         $req = [System.Net.HttpWebRequest]::Create($HealthUrl)
         $req.Proxy = $null
-        $req.Timeout = 550
+        $req.Timeout = 500
         $resp = $req.GetResponse()
         $ok = ([int]$resp.StatusCode -eq 200)
         $resp.Close()
@@ -72,8 +72,10 @@ function Open-ToyAppWindow {
             "--user-data-dir=$appProf",
             "--app=$target",
             "--window-size=1560,940",
+            "--force-dark-mode",
             "--no-first-run",
-            "--no-default-browser-check"
+            "--no-default-browser-check",
+            "--disable-features=Translate,EdgeSidebar,msEdgeSidebarV2"
         ) | Out-Null
     } else {
         Start-Process $target | Out-Null
@@ -82,7 +84,6 @@ function Open-ToyAppWindow {
 
 $IsWakeOnly = ($Arg0 -like 'ophanim-toy-wp:*') -or ($Arg0 -eq '--headless-daemon')
 
-# If daemon is already running on 127.0.0.1:18791, just open window (unless wake-only) and exit!
 if (Test-HostAlive) {
     if (-not $IsWakeOnly) {
         Open-ToyAppWindow
@@ -90,12 +91,12 @@ if (Test-HostAlive) {
     exit 0
 }
 
-# 2. Compile zero-dependency C# Win32 + Loopback HTTP/WebSocket Wallpaper Micro-Host (C# 5 compatible)
-Add-Type -ReferencedAssemblies @('System.dll', 'System.Core.dll', 'System.Web.Extensions.dll') -TypeDefinition @'
+$CsSource = @'
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Management;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -132,6 +133,7 @@ public static class OphanimToyNativeHost
     [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool EnableWindow(IntPtr hWnd, bool enable);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int cmd);
+    [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr hWnd, ref POINT lpPoint);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeoutW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
     [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] private static extern int GetWindowLong32(IntPtr hWnd, int idx);
@@ -150,6 +152,7 @@ public static class OphanimToyNativeHost
         if (IntPtr.Size == 8) SetWindowLongPtr64(hWnd, idx, new IntPtr(v32));
         else SetWindowLong32(hWnd, idx, v32);
     }
+
     [DllImport("user32.dll")] public static extern bool SetLayeredWindowAttributes(IntPtr hWnd, uint crKey, byte bAlpha, uint dwFlags);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr hWnd, IntPtr rc, IntPtr rgn, uint flags);
@@ -162,6 +165,8 @@ public static class OphanimToyNativeHost
     [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int nIndex);
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] private static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+    [DllImport("user32.dll")] private static extern uint GetDpiForSystem();
     [DllImport("user32.dll")] public static extern IntPtr SetWindowsHookExW(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint threadId);
     [DllImport("user32.dll")] public static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool UnhookWindowsHookEx(IntPtr hhk);
@@ -190,14 +195,28 @@ public static class OphanimToyNativeHost
     private const long WS_CLIPCHILDREN = 0x02000000L;
     private const long WS_POPUP = 0x80000000L;
     private const long WS_CAPTION = 0x00C00000L;
+    private const long WS_BORDER = 0x00800000L;
+    private const long WS_DLGFRAME = 0x00400000L;
     private const long WS_THICKFRAME = 0x00040000L;
+    private const long WS_MINIMIZEBOX = 0x00020000L;
+    private const long WS_MAXIMIZEBOX = 0x00010000L;
     private const long WS_SYSMENU = 0x00080000L;
+
     private const long WS_EX_NOPARENTNOTIFY = 0x00000004L;
     private const long WS_EX_TRANSPARENT = 0x00000020L;
     private const long WS_EX_TOOLWINDOW = 0x00000080L;
+    private const long WS_EX_WINDOWEDGE = 0x00000100L;
+    private const long WS_EX_CLIENTEDGE = 0x00000200L;
     private const long WS_EX_APPWINDOW = 0x00040000L;
     private const long WS_EX_LAYERED = 0x00080000L;
     private const long WS_EX_NOACTIVATE = 0x08000000L;
+
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOZORDER = 0x0004;
+    private const uint SWP_NOACTIVATE = 0x0010;
+    private const uint SWP_FRAMECHANGED = 0x0020;
+    private const uint SWP_SHOWWINDOW = 0x0040;
 
     private static string _htmlPath;
     private static string _cacheDir;
@@ -210,6 +229,7 @@ public static class OphanimToyNativeHost
     private static readonly object _wpLock = new object();
 
     private static volatile bool _wpActive = false;
+    private static volatile bool _wallpaperApiTouched = false;
     private static string _wpMode = "agy_live";
     private static string _beamMode = "ambient";
     private static string _origWallpaper = "";
@@ -223,6 +243,94 @@ public static class OphanimToyNativeHost
     private static long _ldownTicks = 0;
     private static bool _hasLdown = false;
     private static LowLevelMouseProc _hookRef;
+
+    private static void EnableDpiAwarenessSafe()
+    {
+        try {
+            if (SetProcessDpiAwarenessContext(new IntPtr(-4))) return;
+        } catch { }
+        try { SetProcessDPIAware(); } catch { }
+    }
+
+    private static void GetPrimaryScreenMetrics(out int physW, out int physH, out int dipW, out int dipH)
+    {
+        EnableDpiAwarenessSafe();
+        physW = Math.Max(800, GetSystemMetrics(0));
+        physH = Math.Max(600, GetSystemMetrics(1));
+        double scale = 1.0;
+        try {
+            uint dpi = GetDpiForSystem();
+            if (dpi >= 96) scale = (double)dpi / 96.0;
+        } catch { }
+        if (scale <= 0.1) scale = 1.0;
+        dipW = Math.Max(800, (int)Math.Round(physW / scale));
+        dipH = Math.Max(600, (int)Math.Round(physH / scale));
+    }
+
+    private static void PresetWallpaperProfilePrefs(string wpProfile, int dipW, int dipH)
+    {
+        try {
+            string defDir = Path.Combine(wpProfile, "Default");
+            Directory.CreateDirectory(defDir);
+            string prefsPath = Path.Combine(defDir, "Preferences");
+            JavaScriptSerializer jss = new JavaScriptSerializer();
+            jss.MaxJsonLength = 4 * 1024 * 1024;
+            Dictionary<string, object> prefs = new Dictionary<string, object>();
+            if (File.Exists(prefsPath)) {
+                try {
+                    Dictionary<string, object> loaded = jss.Deserialize<Dictionary<string, object>>(File.ReadAllText(prefsPath, Encoding.UTF8));
+                    if (loaded != null) prefs = loaded;
+                } catch { }
+            }
+            Dictionary<string, object> browserSec = new Dictionary<string, object>();
+            if (prefs.ContainsKey("browser") && prefs["browser"] is Dictionary<string, object>) {
+                browserSec = (Dictionary<string, object>)prefs["browser"];
+            }
+            Dictionary<string, object> placement = new Dictionary<string, object>();
+            placement["left"] = 0;
+            placement["top"] = 0;
+            placement["right"] = dipW;
+            placement["bottom"] = dipH;
+            placement["maximized"] = false;
+            placement["minimized"] = false;
+            placement["work_area_left"] = 0;
+            placement["work_area_top"] = 0;
+            placement["work_area_right"] = dipW;
+            placement["work_area_bottom"] = dipH;
+            browserSec["window_placement"] = placement;
+            browserSec["has_seen_welcome_page"] = true;
+            prefs["browser"] = browserSec;
+
+            Dictionary<string, object> profSec = new Dictionary<string, object>();
+            if (prefs.ContainsKey("profile") && prefs["profile"] is Dictionary<string, object>) {
+                profSec = (Dictionary<string, object>)prefs["profile"];
+            }
+            profSec["exit_type"] = "Normal";
+            profSec["exited_cleanly"] = true;
+            prefs["profile"] = profSec;
+
+            File.WriteAllText(prefsPath, jss.Serialize(prefs), Encoding.UTF8);
+        } catch { }
+    }
+
+    private static void KillToyWallpaperProfileProcesses()
+    {
+        try {
+            using (ManagementObjectSearcher mos = new ManagementObjectSearcher(
+                "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name='msedge.exe' OR Name='chrome.exe'")) {
+                foreach (ManagementObject mo in mos.Get()) {
+                    try {
+                        string cmd = mo["CommandLine"] != null ? mo["CommandLine"].ToString() : "";
+                        if (cmd.IndexOf("toy_wp_profile", StringComparison.OrdinalIgnoreCase) >= 0) {
+                            int pid = Convert.ToInt32(mo["ProcessId"]);
+                            Process p = Process.GetProcessById(pid);
+                            if (!p.HasExited) p.Kill();
+                        }
+                    } catch { }
+                }
+            }
+        } catch { }
+    }
 
     private static void HideFromTaskbar(IntPtr hwnd)
     {
@@ -258,18 +366,25 @@ public static class OphanimToyNativeHost
     private static List<IntPtr> FindWallpaperHwnds()
     {
         List<IntPtr> list = new List<IntPtr>();
-        EnumWindowsProc cb = delegate(IntPtr h, IntPtr lp) {
-            if (GetWinClass(h) == "Chrome_WidgetWin_1") {
+        List<IntPtr> workerParents = new List<IntPtr>();
+        EnumWindowsProc checkCb = delegate(IntPtr h, IntPtr lp) {
+            string cls = GetWinClass(h);
+            if (cls == "Chrome_WidgetWin_1") {
                 string t = GetWinTitle(h);
                 if (t != null && t.ToUpperInvariant().Contains("OPHANIM WALLPAPER")) {
                     if (!list.Contains(h)) list.Add(h);
                 }
+            } else if (cls == "WorkerW") {
+                if (!workerParents.Contains(h)) workerParents.Add(h);
             }
             return true;
         };
-        EnumWindows(cb, IntPtr.Zero);
+        EnumWindows(checkCb, IntPtr.Zero);
         IntPtr progman = FindWindowW("Progman", null);
-        if (progman != IntPtr.Zero) EnumChildWindows(progman, cb, IntPtr.Zero);
+        if (progman != IntPtr.Zero) EnumChildWindows(progman, checkCb, IntPtr.Zero);
+        foreach (IntPtr ww in workerParents) {
+            EnumChildWindows(ww, checkCb, IntPtr.Zero);
+        }
         return list;
     }
 
@@ -285,63 +400,101 @@ public static class OphanimToyNativeHost
         return "";
     }
 
-    private static void ResolveDesktopLayer(out IntPtr hostParent, out IntPtr insertAfter, out IntPtr progmanOut)
+    private static bool ApplyWallpaperStylesAndZOrder(IntPtr hwnd, int physW, int physH)
     {
+        EnableDpiAwarenessSafe();
+        if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return false;
+
         IntPtr progman = FindWindowW("Progman", null);
-        progmanOut = progman;
-        hostParent = progman;
-        insertAfter = IntPtr.Zero;
-        if (progman == IntPtr.Zero) return;
+        if (progman == IntPtr.Zero) return false;
 
         IntPtr dummy;
-        SendMessageTimeoutW(progman, 0x052C, new IntPtr(0xD), IntPtr.Zero, 0, 1000, out dummy);
         SendMessageTimeoutW(progman, 0x052C, new IntPtr(0xD), new IntPtr(1), 0, 1000, out dummy);
+        SendMessageTimeoutW(progman, 0x052C, IntPtr.Zero, IntPtr.Zero, 0, 1000, out dummy);
 
-        IntPtr defViewOnProgman = FindWindowExW(progman, IntPtr.Zero, "SHELLDLL_DefView", null);
-        if (defViewOnProgman != IntPtr.Zero) {
-            hostParent = progman;
-            insertAfter = defViewOnProgman;
-            return;
+        IntPtr defviewInProgman = FindWindowExW(progman, IntPtr.Zero, "SHELLDLL_DefView", null);
+
+        long stripStyle = WS_POPUP | WS_CAPTION | WS_BORDER | WS_DLGFRAME | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU;
+        long childFlags = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_DISABLED;
+        long exStrip = WS_EX_APPWINDOW | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE;
+        long exAdd = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_NOPARENTNOTIFY | WS_EX_LAYERED;
+
+        if (defviewInProgman != IntPtr.Zero) {
+            // Windows 11 24H2+ RaisedDesktop (`SHELLDLL_DefView` & `WorkerW` inside `Progman`)
+            IntPtr curParent = GetParent(hwnd);
+            long curStyle = GetWinLongSafe(hwnd, GWL_STYLE) & 0xFFFFFFFFL;
+            long newStyle = ((curStyle & ~stripStyle) | childFlags) & 0xFFFFFFFFL;
+            SetWinLongSafe(hwnd, GWL_STYLE, newStyle);
+
+            long curEx = GetWinLongSafe(hwnd, GWL_EXSTYLE) & 0xFFFFFFFFL;
+            long newEx = ((curEx & ~exStrip) | exAdd) & 0xFFFFFFFFL;
+            SetWinLongSafe(hwnd, GWL_EXSTYLE, newEx);
+            SetLayeredWindowAttributes(hwnd, 0, 255, 0x02);
+            EnableWindow(hwnd, false);
+            HideFromTaskbar(hwnd);
+
+            if (curParent != progman) {
+                SetParent(hwnd, progman);
+                SetWinLongSafe(hwnd, GWL_STYLE, newStyle);
+                SetWinLongSafe(hwnd, GWL_EXSTYLE, newEx);
+                SetLayeredWindowAttributes(hwnd, 0, 255, 0x02);
+                EnableWindow(hwnd, false);
+                HideFromTaskbar(hwnd);
+            }
+
+            POINT pt = new POINT { x = 0, y = 0 };
+            ScreenToClient(progman, ref pt);
+            SetWindowPos(hwnd, defviewInProgman, pt.x, pt.y, physW, physH, SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+            HideFromTaskbar(hwnd);
+
+            IntPtr workerwInProgman = FindWindowExW(progman, IntPtr.Zero, "WorkerW", null);
+            if (workerwInProgman != IntPtr.Zero && workerwInProgman != hwnd) {
+                SetWindowPos(workerwInProgman, hwnd, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            return true;
         }
 
-        IntPtr workerWithIcons = IntPtr.Zero;
-        EnumWindows(delegate(IntPtr top, IntPtr lp) {
-            if (GetWinClass(top) == "WorkerW") {
-                IntPtr dv = FindWindowExW(top, IntPtr.Zero, "SHELLDLL_DefView", null);
-                if (dv != IntPtr.Zero) {
-                    workerWithIcons = top;
+        // Classic Windows 10 / Windows 11 <=23H2 `WorkerW` architecture
+        IntPtr wallpaperWorkerW = IntPtr.Zero;
+        EnumWindows(delegate(IntPtr topH, IntPtr lp) {
+            IntPtr dv = FindWindowExW(topH, IntPtr.Zero, "SHELLDLL_DefView", null);
+            if (dv != IntPtr.Zero) {
+                IntPtr w = FindWindowExW(IntPtr.Zero, topH, "WorkerW", null);
+                if (w != IntPtr.Zero) {
+                    wallpaperWorkerW = w;
                     return false;
                 }
             }
             return true;
         }, IntPtr.Zero);
 
-        if (workerWithIcons != IntPtr.Zero) {
-            IntPtr bgWorker = FindWindowExW(IntPtr.Zero, workerWithIcons, "WorkerW", null);
-            if (bgWorker != IntPtr.Zero) {
-                hostParent = bgWorker;
-                insertAfter = IntPtr.Zero;
-            }
-        }
-    }
+        IntPtr targetParent = wallpaperWorkerW != IntPtr.Zero ? wallpaperWorkerW : progman;
+        IntPtr curP = GetParent(hwnd);
+        long cStyle = GetWinLongSafe(hwnd, GWL_STYLE) & 0xFFFFFFFFL;
+        long nStyle = ((cStyle & ~stripStyle) | childFlags) & 0xFFFFFFFFL;
+        SetWinLongSafe(hwnd, GWL_STYLE, nStyle);
 
-    private static void ApplyChildStylesAndEmbed(IntPtr hwnd, IntPtr hostParent, IntPtr insertAfter, int w, int h)
-    {
-        long curStyle = GetWinLongSafe(hwnd, GWL_STYLE);
-        long stripped = curStyle & ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_SYSMENU);
-        long childStyle = (stripped | WS_CHILD | WS_VISIBLE | WS_DISABLED | WS_CLIPSIBLINGS | WS_CLIPCHILDREN) & 0xFFFFFFFFL;
-        SetWinLongSafe(hwnd, GWL_STYLE, childStyle);
-
-        long curEx = GetWinLongSafe(hwnd, GWL_EXSTYLE);
-        long exClean = curEx & ~(WS_EX_APPWINDOW);
-        long childEx = (exClean | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_NOPARENTNOTIFY | WS_EX_LAYERED) & 0xFFFFFFFFL;
-        SetWinLongSafe(hwnd, GWL_EXSTYLE, childEx);
+        long cEx = GetWinLongSafe(hwnd, GWL_EXSTYLE) & 0xFFFFFFFFL;
+        long nEx = ((cEx & ~exStrip) | exAdd) & 0xFFFFFFFFL;
+        SetWinLongSafe(hwnd, GWL_EXSTYLE, nEx);
         SetLayeredWindowAttributes(hwnd, 0, 255, 0x02);
-
         EnableWindow(hwnd, false);
-        SetParent(hwnd, hostParent);
-        SetWindowPos(hwnd, insertAfter, 0, 0, w, h, 0x0010 | 0x0020 | 0x0040);
         HideFromTaskbar(hwnd);
+
+        if (curP != targetParent) {
+            SetParent(hwnd, targetParent);
+            SetWinLongSafe(hwnd, GWL_STYLE, nStyle);
+            SetWinLongSafe(hwnd, GWL_EXSTYLE, nEx);
+            SetLayeredWindowAttributes(hwnd, 0, 255, 0x02);
+            EnableWindow(hwnd, false);
+            HideFromTaskbar(hwnd);
+        }
+
+        POINT ptClassic = new POINT { x = 0, y = 0 };
+        ScreenToClient(targetParent, ref ptClassic);
+        SetWindowPos(hwnd, IntPtr.Zero, ptClassic.x, ptClassic.y, physW, physH, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        HideFromTaskbar(hwnd);
+        return true;
     }
 
     private static void DetachAndCloseExisting(bool restoreStatic)
@@ -358,7 +511,7 @@ public static class OphanimToyNativeHost
                 if (pid > 0 && !_spawnedWpPids.Contains((int)pid)) _spawnedWpPids.Add((int)pid);
             } catch { }
         }
-        Thread.Sleep(180);
+        Thread.Sleep(160);
         foreach (int pid in _spawnedWpPids.ToArray()) {
             try {
                 Process p = Process.GetProcessById(pid);
@@ -366,6 +519,7 @@ public static class OphanimToyNativeHost
             } catch { }
         }
         _spawnedWpPids.Clear();
+        KillToyWallpaperProfileProcesses();
         _wpHwnd = IntPtr.Zero;
 
         if (restoreStatic) {
@@ -387,39 +541,80 @@ public static class OphanimToyNativeHost
         }
     }
 
+    public static IntPtr SpawnWallpaperBrowserOnlyForTest(out int procId)
+    {
+        procId = 0;
+        int physW, physH, dipW, dipH;
+        GetPrimaryScreenMetrics(out physW, out physH, out dipW, out dipH);
+        string wpProfile = Path.Combine(_cacheDir, "toy_wp_profile");
+        string wpDiskCache = Path.Combine(_cacheDir, "toy_wp_cache");
+        Directory.CreateDirectory(wpProfile);
+        Directory.CreateDirectory(wpDiskCache);
+        PresetWallpaperProfilePrefs(wpProfile, dipW, dipH);
+        KillToyWallpaperProfileProcesses();
+
+        string wpUrl = string.Format(
+            "http://127.0.0.1:{0}/ophanim_toy_sanctum.html?ws=ws://127.0.0.1:{0}/ws&wallpaper=1&wpMode=ambient_eco&beamMode=ambient&eco=1&t={1}",
+            _port, DateTime.UtcNow.Ticks
+        );
+        bool isEdge = _browserExe.ToLowerInvariant().Contains("msedge");
+        string kioskExtra = isEdge ? "--edge-kiosk-type=fullscreen " : "";
+        string args = string.Format(
+            "--user-data-dir=\"{0}\" --disk-cache-dir=\"{1}\" --window-position=0,0 --window-size={2},{3} --kiosk \"{4}\" {5}--no-first-run --no-default-browser-check --disable-extensions --disable-sync --disable-infobars --disable-session-crashed-bubble --autoplay-policy=no-user-gesture-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-features=CalculateNativeWinOcclusion,Translate,msEdgeSidebarV2",
+            wpProfile, wpDiskCache, dipW, dipH, wpUrl, kioskExtra
+        );
+        ProcessStartInfo psi = new ProcessStartInfo(_browserExe, args);
+        psi.UseShellExecute = false;
+        Process proc = Process.Start(psi);
+        if (proc != null) procId = proc.Id;
+
+        Stopwatch sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < 12000) {
+            List<IntPtr> found = FindWallpaperHwnds();
+            if (found.Count > 0) return found[0];
+            Thread.Sleep(45);
+        }
+        return IntPtr.Zero;
+    }
+
     private static string EnableWallpaperInternal(string wpMode, string beamMode)
     {
         lock (_wpLock) {
             if (string.IsNullOrEmpty(_browserExe) || !File.Exists(_browserExe)) {
-                return "{\"ok\":false,\"active\":false,\"error\":\"未找到 Microsoft Edge 或 Chrome 浏览器\"}";
+                return "{\"ok\":false,\"active\":false,\"error\":\"\u672a\u627e\u5230 Microsoft Edge \u6216 Chrome \u6d4f\u89c8\u5668\"}";
+            }
+            IntPtr progmanCheck = FindWindowW("Progman", null);
+            if (progmanCheck == IntPtr.Zero) {
+                return "{\"ok\":false,\"active\":false,\"error\":\"\u65e0\u6cd5\u5b9a\u4f4d Windows Progman \u684c\u9762\u56fe\u5c42\"}";
             }
             if (string.IsNullOrEmpty(_origWallpaper)) {
                 _origWallpaper = ReadSystemWallpaper();
             }
             DetachAndCloseExisting(false);
 
-            IntPtr hostParent, insertAfter, progman;
-            ResolveDesktopLayer(out hostParent, out insertAfter, out progman);
-            if (hostParent == IntPtr.Zero) {
-                return "{\"ok\":false,\"active\":false,\"error\":\"无法定位 Windows Progman 桌面图层\"}";
-            }
-
-            int physW = Math.Max(800, GetSystemMetrics(0));
-            int physH = Math.Max(600, GetSystemMetrics(1));
+            int physW, physH, dipW, dipH;
+            GetPrimaryScreenMetrics(out physW, out physH, out dipW, out dipH);
 
             string wpProfile = Path.Combine(_cacheDir, "toy_wp_profile");
+            string wpDiskCache = Path.Combine(_cacheDir, "toy_wp_cache");
             Directory.CreateDirectory(wpProfile);
+            Directory.CreateDirectory(wpDiskCache);
+            PresetWallpaperProfilePrefs(wpProfile, dipW, dipH);
 
-            string effBeam = (wpMode == "ambient_eco") ? "ambient" : (string.IsNullOrEmpty(beamMode) ? "ambient" : beamMode);
+            string cleanMode = (wpMode == "ambient_eco") ? "ambient_eco" : "agy_live";
+            string effBeam = (cleanMode == "ambient_eco") ? "ambient" : (string.IsNullOrEmpty(beamMode) ? "ambient" : beamMode);
+            string ecoFlag = (cleanMode == "ambient_eco") ? "1" : "0";
             string wpUrl = string.Format(
-                "http://127.0.0.1:{0}/ophanim_toy_sanctum.html?wallpaper=1&ws=ws://127.0.0.1:{0}/ws&wp_mode={1}&beam={2}&ts={3}",
-                _port, Uri.EscapeDataString(wpMode), Uri.EscapeDataString(effBeam), DateTime.UtcNow.Ticks
+                "http://127.0.0.1:{0}/ophanim_toy_sanctum.html?ws=ws://127.0.0.1:{0}/ws&wallpaper=1&wpMode={1}&beamMode={2}&eco={3}&t={4}",
+                _port, Uri.EscapeDataString(cleanMode), Uri.EscapeDataString(effBeam), ecoFlag, DateTime.UtcNow.Ticks
             );
 
+            // IMPORTANT: NEVER pass `--inprivate` with `--kiosk --edge-kiosk-type=fullscreen` (Edge blocks Kiosk in InPrivate!)
             bool isEdge = _browserExe.ToLowerInvariant().Contains("msedge");
+            string kioskExtra = isEdge ? "--edge-kiosk-type=fullscreen " : "";
             string args = string.Format(
-                "--user-data-dir=\"{0}\" --kiosk \"{1}\" {2} --window-position=0,0 --window-size={3},{4} --no-first-run --no-default-browser-check --disable-session-crashed-bubble --disable-infobars --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --autoplay-policy=no-user-gesture-required",
-                wpProfile, wpUrl, isEdge ? "--edge-kiosk-type=fullscreen --inprivate" : "--incognito", physW, physH
+                "--user-data-dir=\"{0}\" --disk-cache-dir=\"{1}\" --window-position=0,0 --window-size={2},{3} --kiosk \"{4}\" {5}--no-first-run --no-default-browser-check --disable-extensions --disable-sync --disable-infobars --disable-session-crashed-bubble --autoplay-policy=no-user-gesture-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-features=CalculateNativeWinOcclusion,Translate,msEdgeSidebarV2",
+                wpProfile, wpDiskCache, dipW, dipH, wpUrl, kioskExtra
             );
 
             ProcessStartInfo psi = new ProcessStartInfo(_browserExe, args);
@@ -429,7 +624,7 @@ public static class OphanimToyNativeHost
 
             IntPtr targetHwnd = IntPtr.Zero;
             Stopwatch sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 8500) {
+            while (sw.ElapsedMilliseconds < 15000) {
                 List<IntPtr> found = FindWallpaperHwnds();
                 if (found.Count > 0) {
                     targetHwnd = found[0];
@@ -440,17 +635,32 @@ public static class OphanimToyNativeHost
 
             if (targetHwnd == IntPtr.Zero) {
                 DetachAndCloseExisting(true);
-                return "{\"ok\":false,\"active\":false,\"error\":\"等待壁纸渲染窗口超时，请重试\"}";
+                return "{\"ok\":false,\"active\":false,\"error\":\"\u7b49\u5f85\u58c1\u7eb8\u6e32\u67d3\u7a97\u53e3\u8d85\u65f6\uff0c\u8bf7\u91cd\u8bd5\"}";
             }
 
-            ApplyChildStylesAndEmbed(targetHwnd, hostParent, insertAfter, physW, physH);
-            Thread.Sleep(160);
-            ApplyChildStylesAndEmbed(targetHwnd, hostParent, insertAfter, physW, physH);
+            if (!ApplyWallpaperStylesAndZOrder(targetHwnd, physW, physH)) {
+                DetachAndCloseExisting(true);
+                return "{\"ok\":false,\"active\":false,\"error\":\"\u5d4c\u5165 Windows \u684c\u9762\u56fe\u5c42\u5931\u8d25\"}";
+            }
 
             _wpHwnd = targetHwnd;
-            _wpMode = wpMode;
+            _wpMode = cleanMode;
             _beamMode = effBeam;
             _wpActive = true;
+
+            // Delayed re-pin thread so Chromium's post-paint kiosk SetWindowPos never escapes Progman
+            IntPtr pinnedTarget = targetHwnd;
+            int pW = physW, pH = physH;
+            Thread repinThread = new Thread(delegate() {
+                int[] delays = new int[] { 250, 650, 1350, 2400 };
+                foreach (int dMs in delays) {
+                    Thread.Sleep(dMs);
+                    if (!_wpActive || _wpHwnd != pinnedTarget || !IsWindow(pinnedTarget)) return;
+                    try { ApplyWallpaperStylesAndZOrder(pinnedTarget, pW, pH); } catch { return; }
+                }
+            });
+            repinThread.IsBackground = true;
+            repinThread.Start();
 
             return BuildStatusJson(true);
         }
@@ -545,8 +755,10 @@ public static class OphanimToyNativeHost
                         continue;
                     }
                     pinTick++;
-                    if (pinTick % 90 == 0 && _wpHwnd != IntPtr.Zero && IsWindow(_wpHwnd)) {
-                        HideFromTaskbar(_wpHwnd);
+                    if (pinTick % 120 == 0 && _wpHwnd != IntPtr.Zero && IsWindow(_wpHwnd)) {
+                        int pw, ph, dw, dh;
+                        GetPrimaryScreenMetrics(out pw, out ph, out dw, out dh);
+                        ApplyWallpaperStylesAndZOrder(_wpHwnd, pw, ph);
                     }
                     POINT pt;
                     if (GetCursorPos(out pt)) {
@@ -652,7 +864,7 @@ public static class OphanimToyNativeHost
         int b0 = s.ReadByte();
         if (b0 < 0) return null;
         int opcode = b0 & 0x0F;
-        if (opcode == 0x8) return null; // Close
+        if (opcode == 0x8) return null;
         int b1 = s.ReadByte();
         if (b1 < 0) return null;
         bool masked = (b1 & 0x80) != 0;
@@ -689,7 +901,7 @@ public static class OphanimToyNativeHost
         if (masked) {
             for (int i = 0; i < data.Length; i++) data[i] = (byte)(data[i] ^ mask[i & 3]);
         }
-        if (opcode == 0x9) { // Ping -> Pong
+        if (opcode == 0x9) {
             try { s.Write(new byte[] { 0x8A, 0x00 }, 0, 2); } catch { }
             return "";
         }
@@ -714,6 +926,7 @@ public static class OphanimToyNativeHost
 
     private static string HandleWallpaperRequestJson(string bodyJson)
     {
+        _wallpaperApiTouched = true;
         JavaScriptSerializer jss = new JavaScriptSerializer();
         jss.MaxJsonLength = 8 * 1024 * 1024;
         Dictionary<string, object> body = jss.Deserialize<Dictionary<string, object>>(string.IsNullOrEmpty(bodyJson) ? "{}" : bodyJson);
@@ -786,7 +999,6 @@ public static class OphanimToyNativeHost
                     if (col > 0) headers[lines[i].Substring(0, col).Trim()] = lines[i].Substring(col + 1).Trim();
                 }
 
-                // Loopback security guard: reject external web origins while allowing `null` (`file://`) & localhost
                 if (headers.ContainsKey("Origin")) {
                     string orig = headers["Origin"].Trim().ToLowerInvariant();
                     if (orig.Length > 0 && orig != "null" && !orig.StartsWith("file://") &&
@@ -801,7 +1013,6 @@ public static class OphanimToyNativeHost
                     return;
                 }
 
-                // WebSocket Upgrade (`/ws`)
                 if (method == "GET" && pathOnly == "/ws" && headers.ContainsKey("Sec-WebSocket-Key")) {
                     string wsKey = headers["Sec-WebSocket-Key"].Trim() + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
                     string acceptKey;
@@ -901,7 +1112,12 @@ public static class OphanimToyNativeHost
                 }
                 if (pathOnly == "/" || pathOnly == "/ophanim_toy_sanctum.html") {
                     if (File.Exists(_htmlPath)) {
-                        byte[] htmlBytes = File.ReadAllBytes(_htmlPath);
+                        string htmlText = File.ReadAllText(_htmlPath, Encoding.UTF8);
+                        if (rawTarget.IndexOf("wallpaper=1", StringComparison.OrdinalIgnoreCase) >= 0) {
+                            htmlText = htmlText.Replace("<title>OPHANIM TOY SANCTUM</title>", "<title>OPHANIM WALLPAPER</title>");
+                            htmlText = htmlText.Replace("<title>OPHANIM UI</title>", "<title>OPHANIM WALLPAPER</title>");
+                        }
+                        byte[] htmlBytes = Encoding.UTF8.GetBytes(htmlText);
                         WriteHttpResponse(ns, 200, "OK", "text/html; charset=utf-8", htmlBytes);
                         return;
                     }
@@ -916,7 +1132,7 @@ public static class OphanimToyNativeHost
 
     public static void StartServer(string htmlPath, string cacheDir, string browserExe, int port, bool openWindowInitially, string appUrl)
     {
-        try { SetProcessDPIAware(); } catch { }
+        EnableDpiAwarenessSafe();
         _htmlPath = htmlPath;
         _cacheDir = cacheDir;
         _configPath = Path.Combine(cacheDir, "toy_saved_config.json");
@@ -925,28 +1141,41 @@ public static class OphanimToyNativeHost
         Directory.CreateDirectory(cacheDir);
 
         TcpListener listener = new TcpListener(IPAddress.Loopback, port);
+        try { listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true); } catch { }
         listener.Start();
 
         StartMouseHookThread();
         StartPointerBroadcastLoop();
 
         if (openWindowInitially && !string.IsNullOrEmpty(browserExe) && File.Exists(browserExe)) {
-            string appProf = Path.Combine(cacheDir, "toy_app_window");
-            Directory.CreateDirectory(appProf);
-            Process.Start(browserExe, string.Format("--user-data-dir=\"{0}\" --app=\"{1}\" --window-size=1560,940 --no-first-run --no-default-browser-check", appProf, appUrl));
+            Thread winOpenThread = new Thread(delegate() {
+                // Grace period: if an already-open `file:///.../ophanim_toy_sanctum.html` tab is polling `/api/health`
+                // after the user clicked [\u8bbe\u4e3a\u58c1\u7eb8], let it immediately set the wallpaper without popping up a duplicate window!
+                Thread.Sleep(850);
+                if (_wallpaperApiTouched || _wpActive) return;
+                try {
+                    string appProf = Path.Combine(cacheDir, "toy_app_window");
+                    Directory.CreateDirectory(appProf);
+                    Process.Start(browserExe, string.Format(
+                        "--user-data-dir=\"{0}\" --app=\"{1}\" --window-size=1560,940 --force-dark-mode --no-first-run --no-default-browser-check --disable-features=Translate,EdgeSidebar,msEdgeSidebarV2",
+                        appProf, appUrl
+                    ));
+                } catch { }
+            });
+            winOpenThread.IsBackground = true;
+            winOpenThread.Start();
         }
 
-        // Auto-idle exit monitor: if neither any UI tab is open nor wallpaper is active for 90s, exit cleanly!
         Thread idleMonitor = new Thread(delegate() {
             int idleSec = 0;
-            Thread.Sleep(25000);
+            Thread.Sleep(30000);
             while (true) {
                 Thread.Sleep(5000);
                 int clientsNow;
                 lock (_wsLock) { clientsNow = _wsClients.Count; }
                 if (!_wpActive && clientsNow == 0) {
                     idleSec += 5;
-                    if (idleSec >= 90) Environment.Exit(0);
+                    if (idleSec >= 180) Environment.Exit(0);
                 } else {
                     idleSec = 0;
                 }
@@ -962,6 +1191,32 @@ public static class OphanimToyNativeHost
     }
 }
 '@
+
+# 2. Cache compiled C# assembly to `.ophanim_toy_cache\OphanimToyHost_<hash>.dll` for <150ms instant startup!
+Add-Type -AssemblyName 'System.Web.Extensions'
+Add-Type -AssemblyName 'System.Management'
+$sha = [System.Security.Cryptography.SHA1]::Create()
+$hashBytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($CsSource))
+$hashHex = ([System.BitConverter]::ToString($hashBytes) -replace '-', '').Substring(0, 12)
+$CachedDll = Join-Path $CacheDir ("OphanimToyHost_" + $hashHex + ".dll")
+
+$LoadedOk = $false
+if (Test-Path -LiteralPath $CachedDll) {
+    try {
+        Add-Type -Path $CachedDll -ErrorAction Stop
+        $LoadedOk = $true
+    } catch {
+        $LoadedOk = $false
+    }
+}
+if (-not $LoadedOk) {
+    try {
+        Add-Type -ReferencedAssemblies @('System.dll', 'System.Core.dll', 'System.Management.dll', 'System.Web.Extensions.dll') -TypeDefinition $CsSource -OutputAssembly $CachedDll -ErrorAction Stop
+        Add-Type -Path $CachedDll -ErrorAction Stop
+    } catch {
+        Add-Type -ReferencedAssemblies @('System.dll', 'System.Core.dll', 'System.Management.dll', 'System.Web.Extensions.dll') -TypeDefinition $CsSource
+    }
+}
 
 $BrowserExe = Find-ChromiumExe
 [OphanimToyNativeHost]::StartServer($HtmlFile, $CacheDir, $BrowserExe, $Port, (-not $IsWakeOnly), $AppUrl)
