@@ -11,12 +11,21 @@
 
 ---
 
-## 两个版本任选（仓库内均已包含）
+## 一键下载打包好的压缩包（免 Git，点击直接下载）
 
-| 版本 | 适用人群 | 启动与生成带 LOGO 桌面快捷方式 |
-| :--- | :--- | :--- |
-| **1. 完整全能桥接版 (Full Agent Bridge Edition)** | 将自己的 AI Agent（**Google Antigravity / DeepSeek / Codex / Claude Code / Cursor**）接入 3D 圣轮实时联动 + 会话管理 + 动态壁纸 | 运行 `pip install -r requirements.txt` 后双击 `Start_Ophanim_Sanctum.bat`；双击 `Create_Desktop_Shortcut.bat` 可在桌面生成带**圣轮玫瑰星盘 LOGO** 的快捷方式 |
-| **2. 纯观赏玩具与动态壁纸版 (Toy & Wallpaper Edition)** | 不需要连接任何 AI 工具、无需安装 Python，纯粹当成解压 3D 机械圣轮模板把玩或设为可交互的 Windows 动态桌面壁纸 | 进入 `toy-wallpaper-edition/`：纯网页把玩直接双击 `ophanim_toy_sanctum.html`（单文件即可运行）；需设为桌面动态壁纸时双击 `Ophanim_Wallpaper_Toy.bat`（零依赖原生挂载） |
+不用找深藏在侧边栏的入口，直接点击下方链接即可下载开箱即用的 `.zip` 压缩包（也可前往 **[Releases 打包下载页](https://github.com/jij793053-prog/ophanim-sanctum/releases/latest)** 查看详情）：
+
+- **[点击直接下载：1. 完整全能桥接版 (`Ophanim-Sanctum-Full-Edition.zip`)](https://github.com/jij793053-prog/ophanim-sanctum/releases/latest/download/Ophanim-Sanctum-Full-Edition.zip)** —— 接入 AI Agent 实时联动 + 会话管理 + 动态桌面壁纸
+- **[点击直接下载：2. 纯观赏玩具与动态壁纸版 (`Ophanim-Sanctum-Toy-Wallpaper-Edition.zip`)](https://github.com/jij793053-prog/ophanim-sanctum/releases/latest/download/Ophanim-Sanctum-Toy-Wallpaper-Edition.zip)** —— 零 Python、零配置，纯网页 3D 把玩或一键设为 Windows 动态壁纸
+
+---
+
+## 两个版本任选对比
+
+| 版本 | 直接下载链接 | 适用人群 | 启动与生成桌面快捷方式 |
+| :--- | :--- | :--- | :--- |
+| **1. 完整全能桥接版**<br>*(Full Agent Bridge Edition)* | **[直接下载 Full ZIP](https://github.com/jij793053-prog/ophanim-sanctum/releases/latest/download/Ophanim-Sanctum-Full-Edition.zip)** | 将自己的 AI Agent（**Google Antigravity / DeepSeek / Codex / Claude Code / Cursor**）接入 3D 圣轮实时联动 + 会话管理 + 动态壁纸 | 解压后运行 `pip install -r requirements.txt`，双击 `Start_Ophanim_Sanctum.bat` 启动；双击 `Create_Desktop_Shortcut.bat` 可在桌面生成带**圣轮玫瑰星盘 LOGO** 的快捷方式 |
+| **2. 纯观赏玩具与动态壁纸版**<br>*(Toy & Wallpaper Edition)* | **[直接下载 Toy ZIP](https://github.com/jij793053-prog/ophanim-sanctum/releases/latest/download/Ophanim-Sanctum-Toy-Wallpaper-Edition.zip)** | 不需要连接任何 AI 工具、无需安装 Python，纯粹当成解压 3D 机械圣轮模板把玩或设为可交互的 Windows 动态桌面壁纸 | 解压后：纯网页把玩直接双击 `ophanim_toy_sanctum.html`（单文件即可运行）；需设为桌面动态壁纸时双击 `Ophanim_Wallpaper_Toy.bat`（零依赖原生挂载） |
 
 ---
 
