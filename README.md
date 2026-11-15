@@ -9,6 +9,12 @@
 
 **Ophanim Sanctum** 是一个纯黑白消隐建筑线框风格的 **3D 实时 AI 智能体全息观测圣殿与 Windows 互动动态桌面壁纸**。它将 AI Agent 的思考、文件读写、核心架构镌刻、`/swarm` 子智能体并发、Token 速率以及任务完工仪式，映射为一座实时运转的七重同心浑天圣轮。
 
+## 实机运行画面预览 (Live Sanctuary Preview)
+
+<p align="center">
+  <img src="./assets/ophanim_live_preview.jpg" alt="Ophanim Sanctum 3D Live UI Preview" width="100%" />
+</p>
+
 ---
 
 ## 一键下载打包好的压缩包（免 Git，点击直接下载）
