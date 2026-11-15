@@ -2679,6 +2679,8 @@
       const q = st.quota || {};
       const slabCnt = (lastSnapshot && lastSnapshot.slabs) ? lastSnapshot.slabs.length : 0;
       const delivCnt = (lastSnapshot && lastSnapshot.deliverables) ? lastSnapshot.deliverables.length : 0;
+      const eyeCap = Math.max(0, Math.min(20, Math.round(8 * (typeof st.eyeDensityMult === 'number' ? st.eyeDensityMult : 1))));
+      const mountedEyeCnt = Math.min(delivCnt, eyeCap);
       const wkCnt = (lastSnapshot && lastSnapshot.workers) ? lastSnapshot.workers.length : st.swarmCount;
       bodyEl.innerHTML = [
         '<div class="wb-set-card">',
@@ -2695,7 +2697,7 @@
         '  <div class="wb-set-card-hdr"><span>当前会话三维圣轮装载概览</span><span>3D MANIFOLD</span></div>',
         '  <div class="wb-set-grid-3" style="font-family:var(--font-mono);font-size:10.5px;">',
         '    <div style="border:1px solid var(--line-faint);padding:8px;">代码薄板: <strong>' + slabCnt + ' 枚</strong></div>',
-        '    <div style="border:1px solid var(--line-faint);padding:8px;">外环交付圣瞳: <strong>' + delivCnt + ' 眼</strong></div>',
+        '    <div style="border:1px solid var(--line-faint);padding:8px;">外环交付圣瞳: <strong>' + mountedEyeCnt + ' 眼' + (delivCnt > mountedEyeCnt ? (' (历史 ' + delivCnt + ' 份)') : '') + '</strong></div>',
         '    <div style="border:1px solid var(--line-faint);padding:8px;">蜂群子模型: <strong>' + wkCnt + ' 星</strong></div>',
         '  </div>',
         '</div>'
@@ -4075,10 +4077,18 @@
 
     const slabCnt = (snap.slabs || []).length;
     const delivCnt = (snap.deliverables || []).length;
+    const curSt = (window.ophanimAgent && typeof window.ophanimAgent.getFullControlState === 'function')
+      ? (window.ophanimAgent.getFullControlState() || {})
+      : {};
+    const eyeCapNow = Math.max(0, Math.min(20, Math.round(8 * (typeof curSt.eyeDensityMult === 'number' ? curSt.eyeDensityMult : 1))));
+    const mountedEyesNow = Math.min(delivCnt, eyeCapNow);
     const workerCnt = (snap.workers || []).length;
     const isRun = snap.status === 'running';
     const stTag = isRun ? '● 工作中' : '✓ 已完成';
-    const countsTxt = '薄板 ' + slabCnt + ' · 圣瞳 ' + delivCnt + ' · 蜂群 ' + workerCnt;
+    const eyeCountLabel = delivCnt > mountedEyesNow
+      ? (mountedEyesNow + '/' + delivCnt)
+      : String(mountedEyesNow);
+    const countsTxt = '薄板 ' + slabCnt + ' · 圣瞳 ' + eyeCountLabel + ' · 蜂群 ' + workerCnt;
 
     ['agy-core-modal-title', 'agy-wb-chat-title'].forEach(function (id) {
       const el = document.getElementById(id);

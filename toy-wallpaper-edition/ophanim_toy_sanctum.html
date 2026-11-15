@@ -1256,22 +1256,63 @@
     }
 
     #deliverables-modal {
-      width: min(94vw, 660px);
-      max-height: 80vh;
-      background: rgba(8, 8, 12, 0.74);
-      backdrop-filter: blur(5px);
+      width: min(94vw, 760px);
+      height: min(82vh, 600px);
+      min-width: 480px;
+      min-height: 320px;
+      max-width: calc(100vw - 24px);
+      max-height: calc(100vh - 24px);
+      position: relative;
+      overflow: hidden;
+      background: rgba(8, 8, 12, 0.78);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
       color: #f2f2f5;
       border: 1px solid rgba(242, 242, 245, 0.85);
       display: flex;
       flex-direction: column;
-      box-shadow: 0 24px 72px rgba(0, 0, 0, 0.72);
+      box-shadow: 0 24px 72px rgba(0, 0, 0, 0.76);
       transform: translateY(14px) scale(0.95);
       opacity: 0;
       transition: transform 0.38s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.34s ease;
     }
+    #deliverables-modal.resizing-now,
+    #source-modal.resizing-now {
+      transition: none !important;
+      user-select: none;
+    }
     #deliverables-modal-backdrop.visible-phase #deliverables-modal {
       transform: translateY(0) scale(1);
       opacity: 1;
+    }
+
+    /* Center-Locked Symmetric Resize Handles on #deliverables-modal & #source-modal (matches #agy-core-modal!) */
+    .oculus-modal-rs { position: absolute; z-index: 34; }
+    .oculus-modal-rs-n { top: 0; left: 16px; right: 16px; height: 6px; cursor: ns-resize; }
+    .oculus-modal-rs-s { bottom: 0; left: 16px; right: 16px; height: 6px; cursor: ns-resize; }
+    .oculus-modal-rs-e { right: 0; top: 18px; bottom: 18px; width: 6px; cursor: ew-resize; }
+    .oculus-modal-rs-w { left: 0; top: 18px; bottom: 18px; width: 6px; cursor: ew-resize; }
+    .oculus-modal-rs-nw { top: 0; left: 0; width: 15px; height: 15px; cursor: nwse-resize; }
+    .oculus-modal-rs-sw { bottom: 0; left: 0; width: 15px; height: 15px; cursor: nesw-resize; }
+    .oculus-modal-rs-ne {
+      top: 0; right: 0; width: 18px; height: 18px; cursor: nesw-resize; z-index: 36;
+      border-top: 2px solid rgba(242, 242, 245, 0.88);
+      border-right: 2px solid rgba(242, 242, 245, 0.88);
+      opacity: 0.72;
+      transition: opacity 0.15s ease, background-color 0.15s ease;
+    }
+    .oculus-modal-rs-se {
+      bottom: 0; right: 0; width: 20px; height: 20px; cursor: nwse-resize; z-index: 36;
+      border-bottom: 2px solid rgba(242, 242, 245, 0.92);
+      border-right: 2px solid rgba(242, 242, 245, 0.92);
+      background: linear-gradient(135deg, transparent 52%, rgba(242, 242, 245, 0.28) 52%, rgba(242, 242, 245, 0.28) 64%, transparent 64%, transparent 76%, rgba(242, 242, 245, 0.55) 76%);
+      opacity: 0.82;
+      transition: opacity 0.15s ease, background-color 0.15s ease;
+    }
+    .oculus-modal-rs-ne:hover,
+    .oculus-modal-rs-se:hover {
+      opacity: 1;
+      background-color: rgba(255, 255, 255, 0.16);
     }
 
     /* Modal B: Unified 3D Camera Dolly-In Close-Up + Translucent Glass Inspector (matches Eyeball Modal!) */
@@ -1298,6 +1339,11 @@
     #source-modal {
       width: min(94vw, 720px);
       height: min(80vh, 560px);
+      min-width: 480px;
+      min-height: 320px;
+      max-width: calc(100vw - 24px);
+      max-height: calc(100vh - 24px);
+      position: relative;
       background: rgba(8, 8, 12, 0.76);
       backdrop-filter: blur(6px);
       color: #f2f2f5;
@@ -1333,16 +1379,76 @@
       display: flex;
       flex-direction: column;
       gap: 9px;
-      flex: 1;
+      flex: 1 1 0;
+      min-height: 0;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(242, 242, 245, 0.28) transparent;
+    }
+
+    .deliv-sec-divider {
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      letter-spacing: 0.12em;
+      color: #9ca0aa;
+      padding: 5px 2px 3px;
+      border-bottom: 1px dashed rgba(242, 242, 245, 0.22);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
     }
 
     .deliv-card {
       border: 1px solid rgba(242, 242, 245, 0.24);
       padding: 10px 12px;
       background: #0c0c10;
-      transition: border-color 0.16s ease;
+      transition: border-color 0.16s ease, background-color 0.16s ease;
+      flex-shrink: 0;
     }
     .deliv-card:hover { border-color: #f2f2f5; }
+    .deliv-card.focused-current {
+      border: 1.5px solid #ffffff;
+      background: #14151c;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+    }
+    .deliv-card.archived-history {
+      border-color: rgba(242, 242, 245, 0.16);
+      background: rgba(10, 10, 14, 0.78);
+    }
+
+    .deliv-tags-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-bottom: 5px;
+    }
+    .deliv-turn-pill {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      padding: 1px 6px;
+      background: #f2f2f5;
+      color: #050507;
+      border: 1px solid #f2f2f5;
+      white-space: nowrap;
+    }
+    .deliv-slot-pill {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.05em;
+      padding: 1px 6px;
+      border: 1px solid rgba(242, 242, 245, 0.42);
+      color: #e4e6ed;
+      white-space: nowrap;
+    }
+    .deliv-slot-pill.archived {
+      border-style: dashed;
+      border-color: rgba(242, 242, 245, 0.26);
+      color: #969aa5;
+    }
 
     .deliv-row-main {
       display: flex;
@@ -1978,7 +2084,15 @@
   <!-- Modal A: Outermost Ring Patterned Eye Deliverables -->
   <div id="deliverables-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="deliv-modal-title">
     <div id="deliverables-modal">
-      <div class="modal-head">
+      <div class="oculus-modal-rs oculus-modal-rs-n" data-omrs="n"></div>
+      <div class="oculus-modal-rs oculus-modal-rs-s" data-omrs="s"></div>
+      <div class="oculus-modal-rs oculus-modal-rs-e" data-omrs="e"></div>
+      <div class="oculus-modal-rs oculus-modal-rs-w" data-omrs="w"></div>
+      <div class="oculus-modal-rs oculus-modal-rs-nw" data-omrs="nw"></div>
+      <div class="oculus-modal-rs oculus-modal-rs-sw" data-omrs="sw"></div>
+      <div class="oculus-modal-rs oculus-modal-rs-ne" data-omrs="ne" title="按住右上角居中拉伸大小"></div>
+      <div class="oculus-modal-rs oculus-modal-rs-se" data-omrs="se" title="按住右下角拖动拉大 / 拉小窗口"></div>
+      <div class="modal-head" style="padding-right: 26px;">
         <div>
           <div class="modal-kicker" id="deliv-modal-kicker">OUTER OCULUS SIGIL VAULT // 最外环带纹路圣瞳交付产物</div>
           <div class="modal-filename" id="deliv-modal-title">外环铭纹圣瞳 · 最终交付产物</div>
@@ -1988,9 +2102,9 @@
         </div>
       </div>
       <div id="deliverables-list"></div>
-      <div class="modal-foot">
-        <span>LOCAL BRIDGE: window.ophanimAgent.onFileAction(action, item)</span>
-        <span>CLICK ITEM OPTIONS TO OPEN FILE OR DIRECTORY</span>
+      <div class="modal-foot" style="padding-right: 26px;">
+        <span>LOCAL BRIDGE: 打开文件或定位所在目录 · 保留本会话全部历史交付记录</span>
+        <span>DRAG BOTTOM-RIGHT CORNER ◢ TO RESIZE</span>
       </div>
     </div>
   </div>
@@ -1998,8 +2112,16 @@
   <!-- Modal B: Continuous Morphing Source Code & /swarm Worker Inspector -->
   <div id="source-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-file-title">
     <div id="source-modal">
+      <div class="oculus-modal-rs oculus-modal-rs-n" data-omrs="n"></div>
+      <div class="oculus-modal-rs oculus-modal-rs-s" data-omrs="s"></div>
+      <div class="oculus-modal-rs oculus-modal-rs-e" data-omrs="e"></div>
+      <div class="oculus-modal-rs oculus-modal-rs-w" data-omrs="w"></div>
+      <div class="oculus-modal-rs oculus-modal-rs-nw" data-omrs="nw"></div>
+      <div class="oculus-modal-rs oculus-modal-rs-sw" data-omrs="sw"></div>
+      <div class="oculus-modal-rs oculus-modal-rs-ne" data-omrs="ne" title="按住右上角居中拉伸大小"></div>
+      <div class="oculus-modal-rs oculus-modal-rs-se" data-omrs="se" title="按住右下角拖动拉大 / 拉小窗口"></div>
       <div id="source-modal-inner">
-        <div class="modal-head">
+        <div class="modal-head" style="padding-right: 26px;">
           <div>
             <div class="modal-kicker" id="modal-tier-kicker">STRUCTURAL PLATE // RING_02</div>
             <div class="modal-filename" id="modal-file-title">ophanim_sanctum.html</div>
@@ -2013,9 +2135,9 @@
         <pre id="modal-code-body"></pre>
         <div id="modal-worker-conv-view" aria-label="子智能体 Antigravity 会话消息正文"></div>
         <div id="modal-worker-trace-bar" aria-label="子智能体底层调用轨迹栏"></div>
-        <div class="modal-foot">
+        <div class="modal-foot" style="padding-right: 26px;">
           <span id="modal-meta-left">TYPE: PYTHON_MODULE</span>
-          <span id="modal-meta-right">MONO_CAD // CLICK OUTSIDE TO DISMISS</span>
+          <span id="modal-meta-right">DRAG CORNER ◢ TO RESIZE // CLICK OUTSIDE TO DISMISS</span>
         </div>
       </div>
     </div>
@@ -4194,20 +4316,18 @@ Click patterned eye on outer ring to open file or file location.</textarea>
 
       function syncOuterDeliverablesToActiveEyes() {
         const activeSlots = outerDeliverableEyes.filter(function (s) { return s.activeByDensity !== false; });
-        const savedList = coreVaultDeliverables.slice();
         for (let i = 0; i < outerDeliverableEyes.length; i++) {
           assignDeliverableToOuterEye(outerDeliverableEyes[i], null);
         }
-        if (!activeSlots.length || !savedList.length) return [];
-        const eyeStride = savedList.length <= Math.floor(activeSlots.length * 0.5) ? 2 : 1;
-        const assignedTargets = [];
-        for (let d = 0; d < Math.min(savedList.length, activeSlots.length); d++) {
-          const idx = (d * eyeStride) % activeSlots.length;
-          const slot = activeSlots[idx].deliverable ? activeSlots[d] : activeSlots[idx];
-          assignDeliverableToOuterEye(slot, savedList[d]);
-          assignedTargets.push(slot);
+        if (!activeSlots.length || !coreVaultDeliverables.length) return [];
+        const chronList = coreVaultDeliverables.slice().reverse();
+        const touchedSet = [];
+        for (let k = 0; k < chronList.length; k++) {
+          const slot = activeSlots[k % activeSlots.length];
+          assignDeliverableToOuterEye(slot, chronList[k]);
+          if (touchedSet.indexOf(slot) === -1) touchedSet.push(slot);
         }
-        return assignedTargets;
+        return touchedSet;
       }
 
       function refreshActiveEyeCountReadout() {
@@ -5140,27 +5260,44 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         pushEventLog('⇄ DUAL_INLAY', spec.file, 'RING_01±Z');
       }
 
+      function normalizeDeliverableKey(item) {
+        if (!item) return '';
+        return String(item.fullPath || item.file || '').trim().replace(/\//g, '\\').toLowerCase();
+      }
+
       let deliverEyeCursor = 0;
       function dispatchDeliverToOuterEye(customSpec) {
         if (state.bootPhase === 'dormant') return;
         const activeEyes = outerDeliverableEyes.filter(function (e) { return e.activeByDensity !== false; });
         if (!activeEyes.length) return;
-        const emptyEyes = activeEyes.filter(function (e) { return !e.deliverable; });
-        const targetEye = emptyEyes.length > 0
-          ? emptyEyes[0]
-          : activeEyes[(deliverEyeCursor++) % activeEyes.length];
 
         const fileTitle = (customSpec && customSpec.file)
           ? customSpec.file
           : ('deliverable_build_' + String(coreVaultDeliverables.length + 1).padStart(2, '0') + '.zip');
-        const dirPath = (customSpec && customSpec.dirPath) || 'F:\\antigravity\\projects\\agent-app-offload\\dist';
+        const dirPath = (customSpec && customSpec.dirPath) || './dist';
+        const fullPathVal = (customSpec && customSpec.fullPath) ? customSpec.fullPath : (dirPath + '\\' + fileTitle);
+        const candKey = normalizeDeliverableKey({ fullPath: fullPathVal, file: fileTitle });
+
+        let targetEye = activeEyes.find(function (e) {
+          return e.deliverable && normalizeDeliverableKey(e.deliverable) === candKey;
+        });
+        if (!targetEye) {
+          const emptyEyes = activeEyes.filter(function (e) { return !e.deliverable; });
+          targetEye = emptyEyes.length > 0
+            ? emptyEyes[0]
+            : activeEyes[(coreVaultDeliverables.length || (deliverEyeCursor++)) % activeEyes.length];
+        }
+
         const newItem = {
           file: fileTitle,
           badge: (customSpec && customSpec.badge) || ('OCULUS #' + String(targetEye.eyeSlotIdx + 1).padStart(2, '0')),
+          turnNumber: (customSpec && customSpec.turnNumber) || undefined,
+          firstTurnNumber: (customSpec && customSpec.firstTurnNumber) || (customSpec && customSpec.turnNumber) || undefined,
+          deliveryCount: (customSpec && customSpec.deliveryCount) || 1,
           dirPath: dirPath,
-          fullPath: (customSpec && customSpec.fullPath) ? customSpec.fullPath : (dirPath + '\\' + fileTitle),
+          fullPath: fullPathVal,
           siblings: (customSpec && Array.isArray(customSpec.siblings)) ? customSpec.siblings : ['manifest.json', 'checksum.sha256', 'build_log.txt'],
-          code: (customSpec && customSpec.code) || ('=== FINAL DELIVERABLE (OUTER OCULUS SIGIL) ===\nPath: ' + dirPath + '\\' + fileTitle + '\nStored in Outermost Ring Eye #' + (targetEye.eyeSlotIdx + 1) + ' (engraved filigree active).')
+          code: (customSpec && customSpec.code) || ('=== FINAL DELIVERABLE (OUTER OCULUS SIGIL) ===\nPath: ' + fullPathVal + '\nStored in Outermost Ring Eye #' + (targetEye.eyeSlotIdx + 1) + ' (engraved filigree active).')
         };
 
         const slot = acquireBeamSlot(false);
@@ -5385,12 +5522,30 @@ Click patterned eye on outer ring to open file or file location.</textarea>
                 }, 0.05);
                 ringAssemblies[pnl.ringIdx].stutterHold = 0.20;
               } else if (bm.routeKind === 'deliver_eye') {
-                assignDeliverableToOuterEye(bm.targetObj, bm.payload);
-                bm.targetObj.pulseBoost = 1.35;
-                const exists = coreVaultDeliverables.find(function (d) { return d.file === bm.payload.file; });
-                if (!exists) coreVaultDeliverables.unshift(bm.payload);
+                const pKey = normalizeDeliverableKey(bm.payload);
+                const existIdx = coreVaultDeliverables.findIndex(function (d) {
+                  return normalizeDeliverableKey(d) === pKey;
+                });
+                if (existIdx !== -1) {
+                  const prevRec = coreVaultDeliverables.splice(existIdx, 1)[0];
+                  if (!bm.payload.firstTurnNumber && prevRec.firstTurnNumber) {
+                    bm.payload.firstTurnNumber = prevRec.firstTurnNumber;
+                  }
+                  if (!bm.payload.deliveryCount || bm.payload.deliveryCount <= 1) {
+                    bm.payload.deliveryCount = (prevRec.deliveryCount || 1) + 1;
+                  }
+                }
+                coreVaultDeliverables.unshift(bm.payload);
+                if (coreVaultDeliverables.length > 64) coreVaultDeliverables.length = 64;
+                syncOuterDeliverablesToActiveEyes();
+                const landedSlot = outerDeliverableEyes.find(function (s) {
+                  return s.deliverable && normalizeDeliverableKey(s.deliverable) === pKey;
+                }) || bm.targetObj;
+                if (landedSlot) landedSlot.pulseBoost = 1.35;
                 ringAssemblies[bm.targetObj.ringIdx].stutterHold = 0.22;
-                if (delivModalBackdrop.classList.contains('open')) renderDeliverablesVaultList(bm.targetObj);
+                if (delivModalBackdrop.classList.contains('open')) {
+                  renderDeliverablesVaultList(lastFocusedDeliverableEyeSlot || landedSlot);
+                }
               } else if (bm.routeKind === 'carbon_to_star') {
                 bm.targetObj.pulseBoost = 1.25;
               } else if (bm.routeKind === 'read' || bm.routeKind === 'star_to_carbon') {
@@ -6119,7 +6274,7 @@ Click patterned eye on outer ring to open file or file location.</textarea>
             showToast('OPEN_LOCATION // 已唤醒资源管理器前台窗口并选中: ' + fname);
           }
         } else if (ack.desktopInteractive === false) {
-          showToast('提示：请重新双击桌面 Ophanim_Sanctum.bat 切换至前台桌面桥接后再打开文件夹');
+          showToast('提示：纯观赏模板模式下为演示文件，可在页内预览查看示例内容');
         } else {
           showToast('提示：未能定位本地路径 (' + fname + ')，请确认文件存在且桥接在线');
         }
@@ -6139,7 +6294,7 @@ Click patterned eye on outer ring to open file or file location.</textarea>
             activeLocalWS.send(JSON.stringify(payload));
           } catch (err) { /* ignore */ }
         } else {
-          const httpBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:18790' : '';
+          const httpBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:18791' : '';
           fetch(httpBase + '/api/file-action', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -6148,7 +6303,7 @@ Click patterned eye on outer ring to open file or file location.</textarea>
             .then(function (r) { return r.json(); })
             .then(function (ack) { handleFileActionAck(ack); })
             .catch(function () {
-              showToast('提示：本地桥接未在线，请双击桌面 Ophanim_Sanctum.bat 启动');
+              showToast('提示：纯观赏模板模式下为内置示例产物，可点击「页内预览」查看');
             });
         }
         if (typeof window.ophanimAgent.onFileAction === 'function') {
@@ -6158,6 +6313,8 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           window.parent.postMessage(payload, '*');
         } catch (err) { /* ignore */ }
       }
+
+      let lastFocusedDeliverableEyeSlot = null;
 
       function getActiveEyeDeliverableRecords(focusedEyeSlot) {
         const records = [];
@@ -6177,88 +6334,188 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         return records;
       }
 
-      function renderDeliverablesVaultList(focusedEyeSlot) {
-        const records = getActiveEyeDeliverableRecords(focusedEyeSlot);
-        if (focusedEyeSlot && focusedEyeSlot.deliverable) {
-          delivModalKicker.textContent = 'OCULUS SIGIL #' + String(focusedEyeSlot.eyeSlotIdx + 1).padStart(2, '0') + ' // 最外环带纹路圣瞳已选中';
-          delivModalTitle.textContent = focusedEyeSlot.deliverable.file;
+      function createDeliverableCardEl(item, opts) {
+        const eyeSlot = opts && opts.eyeSlot ? opts.eyeSlot : null;
+        const isFocused = Boolean(opts && opts.isFocused);
+        const isCurrentTop = Boolean(opts && opts.isCurrentTop);
+        const histOrder = opts && typeof opts.histOrder === 'number' ? opts.histOrder : null;
+
+        const card = document.createElement('div');
+        card.className = 'deliv-card' +
+          (isFocused ? ' focused-current' : '') +
+          (!eyeSlot ? ' archived-history' : '');
+
+        const tagsRow = document.createElement('div');
+        tagsRow.className = 'deliv-tags-row';
+
+        if (item.turnNumber) {
+          const turnPill = document.createElement('span');
+          turnPill.className = 'deliv-turn-pill';
+          let turnTxt = '第 ' + item.turnNumber + ' 轮';
+          if (item.deliveryCount && item.deliveryCount > 1) {
+            turnTxt += ' · 累计更新×' + item.deliveryCount;
+          }
+          turnPill.textContent = turnTxt;
+          tagsRow.appendChild(turnPill);
+        }
+
+        const slotPill = document.createElement('span');
+        if (eyeSlot) {
+          slotPill.className = 'deliv-slot-pill';
+          slotPill.textContent = '✦ 在位 · 外环圣瞳 #' + String(eyeSlot.eyeSlotIdx + 1).padStart(2, '0') +
+            (isCurrentTop ? ' [当前点击]' : '');
         } else {
-          delivModalKicker.textContent = 'OUTER OCULUS SIGIL VAULT // 最外环带纹路圣瞳总览';
-          delivModalTitle.textContent = '最外环纹路圣瞳 · 已装载交付产物 (' + records.length + ' / ' + outerDeliverableEyes.length + ' 眼)';
+          slotPill.className = 'deliv-slot-pill archived';
+          slotPill.textContent = '↺ 历史交付归档 (圣瞳已被新文件轮替)';
+        }
+        tagsRow.appendChild(slotPill);
+
+        if (histOrder !== null) {
+          const idxSpan = document.createElement('span');
+          idxSpan.style.cssText = 'font-family:var(--font-mono);font-size:9px;color:#7f838d;margin-left:auto;';
+          idxSpan.textContent = '#' + String(histOrder).padStart(2, '0');
+          tagsRow.appendChild(idxSpan);
+        }
+
+        const rowMain = document.createElement('div');
+        rowMain.className = 'deliv-row-main';
+
+        const infoDiv = document.createElement('div');
+        infoDiv.style.minWidth = '0';
+        infoDiv.style.flex = '1 1 240px';
+        infoDiv.appendChild(tagsRow);
+
+        const nameDiv = document.createElement('div');
+        nameDiv.className = 'deliv-name';
+        nameDiv.style.wordBreak = 'break-all';
+        nameDiv.textContent = item.file;
+
+        const subDiv = document.createElement('div');
+        subDiv.className = 'deliv-sub';
+        subDiv.style.wordBreak = 'break-all';
+        subDiv.textContent = (item.badge || 'FILE') + (item.dirPath ? (' · ' + item.dirPath) : '');
+
+        infoDiv.appendChild(nameDiv);
+        infoDiv.appendChild(subDiv);
+
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'deliv-actions';
+
+        const btnOpenLoc = document.createElement('button');
+        btnOpenLoc.type = 'button';
+        btnOpenLoc.className = 'deliv-action-btn';
+        btnOpenLoc.textContent = '打开文件所在位置';
+        btnOpenLoc.title = '直接唤醒 Windows 资源管理器前台窗口并自动高亮选中该文件';
+
+        const btnOpenFile = document.createElement('button');
+        btnOpenFile.type = 'button';
+        btnOpenFile.className = 'deliv-action-btn primary';
+        btnOpenFile.textContent = '打开该文件';
+        btnOpenFile.title = '使用系统默认程序直接打开该文件';
+
+        const btnPreviewCode = document.createElement('button');
+        btnPreviewCode.type = 'button';
+        btnPreviewCode.className = 'deliv-action-btn';
+        btnPreviewCode.textContent = '页内预览';
+
+        actionsDiv.appendChild(btnOpenLoc);
+        actionsDiv.appendChild(btnOpenFile);
+        actionsDiv.appendChild(btnPreviewCode);
+        rowMain.appendChild(infoDiv);
+        rowMain.appendChild(actionsDiv);
+
+        btnOpenLoc.addEventListener('click', function () {
+          emitLocalFileBridge('open_location', item);
+        });
+        btnOpenFile.addEventListener('click', function () {
+          emitLocalFileBridge('open_file', item);
+        });
+        btnPreviewCode.addEventListener('click', function () {
+          openSourceModal({
+            tierLabel: 'OPENED DELIVERABLE FILE // ' + (item.fullPath || item.file),
+            file: item.file,
+            fullPath: item.fullPath,
+            dirPath: item.dirPath,
+            kind: 'DELIVERABLE',
+            code: item.code,
+            keepCurrentCloseup: true
+          });
+        });
+
+        card.appendChild(rowMain);
+        return card;
+      }
+
+      function renderDeliverablesVaultList(focusedEyeSlot) {
+        lastFocusedDeliverableEyeSlot = focusedEyeSlot || null;
+        const mountedRecords = getActiveEyeDeliverableRecords(focusedEyeSlot);
+        const mountedSlotMap = {};
+        for (let i = 0; i < mountedRecords.length; i++) {
+          const mk = normalizeDeliverableKey(mountedRecords[i].item);
+          if (mk) mountedSlotMap[mk] = mountedRecords[i].eyeSlot;
+        }
+
+        const historyList = coreVaultDeliverables.length > 0
+          ? coreVaultDeliverables.slice()
+          : mountedRecords.map(function (r) { return r.item; });
+        const activeCap = outerDeliverableEyes.filter(function (s) { return s.activeByDensity !== false; }).length;
+        const archivedCount = Math.max(0, historyList.length - mountedRecords.length);
+
+        if (focusedEyeSlot && focusedEyeSlot.deliverable) {
+          delivModalKicker.textContent = 'OCULUS SIGIL #' + String(focusedEyeSlot.eyeSlotIdx + 1).padStart(2, '0') + ' // 四边与右下角可拉伸大小 · 当前圣瞳与历史交付记录';
+          delivModalTitle.textContent = focusedEyeSlot.deliverable.file + (historyList.length > 1 ? ('  (本会话共交付 ' + historyList.length + ' 份)') : '');
+        } else {
+          delivModalKicker.textContent = 'OUTER OCULUS SIGIL VAULT // 四边与右下角可拉伸大小 · 外环圣瞳与完整交付历史';
+          delivModalTitle.textContent = '本会话交付产物与历史记录 (' + historyList.length + ' 份 · 外环在位 ' + mountedRecords.length + '/' + activeCap + ' 眼)';
         }
         delivListEl.innerHTML = '';
 
-        records.forEach(function (rec, idx) {
-          const item = rec.item;
-          const card = document.createElement('div');
-          card.className = 'deliv-card';
-          if (rec.isFocused) {
-            card.style.borderColor = '#ffffff';
-            card.style.background = '#13141a';
-          }
+        if (!historyList.length) {
+          const emptyEl = document.createElement('div');
+          emptyEl.style.cssText = 'padding:28px 14px;text-align:center;font-family:var(--font-mono);font-size:11.5px;color:#8e9199;';
+          emptyEl.textContent = '当前对话暂无已交付落盘文件';
+          delivListEl.appendChild(emptyEl);
+          return;
+        }
 
-          const rowMain = document.createElement('div');
-          rowMain.className = 'deliv-row-main';
+        const focusedKey = (focusedEyeSlot && focusedEyeSlot.deliverable)
+          ? normalizeDeliverableKey(focusedEyeSlot.deliverable)
+          : '';
 
-          const infoDiv = document.createElement('div');
-          const nameDiv = document.createElement('div');
-          nameDiv.className = 'deliv-name';
-          const eyeTag = '✦ 外环圣瞳 #' + String(rec.eyeSlot.eyeSlotIdx + 1).padStart(2, '0') + (rec.isFocused ? ' [当前点击] · ' : ' · ');
-          nameDiv.textContent = eyeTag + item.file;
-          const subDiv = document.createElement('div');
-          subDiv.className = 'deliv-sub';
-          subDiv.textContent = item.badge + ' · ' + item.dirPath;
-          infoDiv.appendChild(nameDiv);
-          infoDiv.appendChild(subDiv);
+        if (focusedEyeSlot && focusedEyeSlot.deliverable) {
+          const curHdr = document.createElement('div');
+          curHdr.className = 'deliv-sec-divider';
+          curHdr.innerHTML = '<span>✦ 当前点击圣瞳收纳产物 · CURRENT OCULUS SIGIL</span><span>圣瞳 #' + String(focusedEyeSlot.eyeSlotIdx + 1).padStart(2, '0') + '</span>';
+          delivListEl.appendChild(curHdr);
+          delivListEl.appendChild(createDeliverableCardEl(focusedEyeSlot.deliverable, {
+            eyeSlot: focusedEyeSlot,
+            isFocused: true,
+            isCurrentTop: true,
+            histOrder: null
+          }));
+        }
 
-          const actionsDiv = document.createElement('div');
-          actionsDiv.className = 'deliv-actions';
+        const histHdr = document.createElement('div');
+        histHdr.className = 'deliv-sec-divider';
+        if (focusedEyeSlot && focusedEyeSlot.deliverable) {
+          histHdr.style.marginTop = '6px';
+        }
+        histHdr.innerHTML =
+          '<span>── 本会话全部交付文件历史记录 · DELIVERABLE HISTORY (最新在上)</span>' +
+          '<span>共 ' + historyList.length + ' 份 · 在位 ' + mountedRecords.length + ' 眼' +
+          (archivedCount > 0 ? (' · 已轮替归档 ' + archivedCount + ' 份') : '') + '</span>';
+        delivListEl.appendChild(histHdr);
 
-          const btnOpenLoc = document.createElement('button');
-          btnOpenLoc.type = 'button';
-          btnOpenLoc.className = 'deliv-action-btn';
-          btnOpenLoc.textContent = '打开文件所在位置';
-          btnOpenLoc.title = '直接唤醒 Windows 资源管理器前台窗口并自动高亮选中该文件';
-
-          const btnOpenFile = document.createElement('button');
-          btnOpenFile.type = 'button';
-          btnOpenFile.className = 'deliv-action-btn primary';
-          btnOpenFile.textContent = '打开该文件';
-          btnOpenFile.title = '使用系统默认程序直接打开该文件';
-
-          const btnPreviewCode = document.createElement('button');
-          btnPreviewCode.type = 'button';
-          btnPreviewCode.className = 'deliv-action-btn';
-          btnPreviewCode.textContent = '页内预览';
-
-          actionsDiv.appendChild(btnOpenLoc);
-          actionsDiv.appendChild(btnOpenFile);
-          actionsDiv.appendChild(btnPreviewCode);
-          rowMain.appendChild(infoDiv);
-          rowMain.appendChild(actionsDiv);
-
-          btnOpenLoc.addEventListener('click', function () {
-            emitLocalFileBridge('open_location', item);
-          });
-
-          btnOpenFile.addEventListener('click', function () {
-            emitLocalFileBridge('open_file', item);
-          });
-
-          btnPreviewCode.addEventListener('click', function () {
-            openSourceModal({
-              tierLabel: 'OPENED DELIVERABLE FILE // ' + item.fullPath,
-              file: item.file,
-              fullPath: item.fullPath,
-              dirPath: item.dirPath,
-              kind: 'DELIVERABLE',
-              code: item.code,
-              keepCurrentCloseup: true
-            });
-          });
-
-          card.appendChild(rowMain);
-          delivListEl.appendChild(card);
+        historyList.forEach(function (item, idx) {
+          const ik = normalizeDeliverableKey(item);
+          const mountedSlot = ik ? (mountedSlotMap[ik] || null) : null;
+          const isSameAsFocused = Boolean(focusedKey && ik === focusedKey);
+          delivListEl.appendChild(createDeliverableCardEl(item, {
+            eyeSlot: mountedSlot,
+            isFocused: isSameAsFocused && !(focusedEyeSlot && focusedEyeSlot.deliverable),
+            isCurrentTop: false,
+            histOrder: historyList.length - idx
+          }));
         });
       }
 
@@ -6508,6 +6765,88 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           eyeCloseupCam.closing = true;
         }
       }
+
+      function wireSymmetricCenteredModalResizer(modalEl, storageKey, minW, minH) {
+        if (!modalEl) return;
+        let savedW = 0;
+        let savedH = 0;
+        try {
+          const raw = window.localStorage.getItem(storageKey);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed.w === 'number') savedW = parsed.w;
+            if (parsed && typeof parsed.h === 'number') savedH = parsed.h;
+          }
+        } catch (err) { /* ignore */ }
+
+        function applyClampedSize() {
+          const vw = Math.max(minW + 24, window.innerWidth || 1440);
+          const vh = Math.max(minH + 24, window.innerHeight || 900);
+          if (savedW >= minW) modalEl.style.width = Math.min(vw - 24, savedW) + 'px';
+          if (savedH >= minH) modalEl.style.height = Math.min(vh - 24, savedH) + 'px';
+        }
+        applyClampedSize();
+
+        let resizing = false;
+        let dir = 'se';
+        let startX = 0, startY = 0, startW = 0, startH = 0;
+
+        modalEl.querySelectorAll('.oculus-modal-rs').forEach(function (h) {
+          h.addEventListener('mousedown', function (e) {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const rect = modalEl.getBoundingClientRect();
+            resizing = true;
+            dir = h.getAttribute('data-omrs') || 'se';
+            startX = e.clientX;
+            startY = e.clientY;
+            startW = rect.width;
+            startH = rect.height;
+            modalEl.classList.add('resizing-now');
+          });
+        });
+
+        window.addEventListener('mousemove', function (e) {
+          if (!resizing) return;
+          const dx = e.clientX - startX;
+          const dy = e.clientY - startY;
+          const maxW = Math.max(minW, (window.innerWidth || 1440) - 24);
+          const maxH = Math.max(minH, (window.innerHeight || 900) - 24);
+          let nextW = startW;
+          let nextH = startH;
+
+          if (dir.indexOf('e') !== -1) {
+            nextW = Math.max(minW, Math.min(maxW, Math.round(startW + dx * 2)));
+          } else if (dir.indexOf('w') !== -1) {
+            nextW = Math.max(minW, Math.min(maxW, Math.round(startW - dx * 2)));
+          }
+          if (dir.indexOf('s') !== -1) {
+            nextH = Math.max(minH, Math.min(maxH, Math.round(startH + dy * 2)));
+          } else if (dir.indexOf('n') !== -1) {
+            nextH = Math.max(minH, Math.min(maxH, Math.round(startH - dy * 2)));
+          }
+
+          savedW = nextW;
+          savedH = nextH;
+          modalEl.style.width = nextW + 'px';
+          modalEl.style.height = nextH + 'px';
+        });
+
+        window.addEventListener('mouseup', function () {
+          if (!resizing) return;
+          resizing = false;
+          modalEl.classList.remove('resizing-now');
+          try {
+            window.localStorage.setItem(storageKey, JSON.stringify({ w: savedW, h: savedH }));
+          } catch (err) { /* ignore */ }
+        });
+
+        window.addEventListener('resize', applyClampedSize);
+      }
+
+      wireSymmetricCenteredModalResizer(document.getElementById('deliverables-modal'), 'ophanim_toy_deliv_modal_size_v1', 480, 320);
+      wireSymmetricCenteredModalResizer(document.getElementById('source-modal'), 'ophanim_toy_source_modal_size_v1', 480, 320);
 
       document.getElementById('btn-close-deliv-modal').addEventListener('click', closeDeliverablesVaultModal);
       delivModalBackdrop.addEventListener('click', function (e) {
@@ -6760,8 +7099,14 @@ Click patterned eye on outer ring to open file or file location.</textarea>
             ttInfoEl.textContent = sum.statusLabel + ' · ' + sum.msgCount + ' 条记录';
             ttHintEl.textContent = '[点击开启核心回执与指令框]';
           } else if (picked.kindType === 'deliverable_eye') {
-            ttInfoEl.textContent = picked.deliverable ? picked.deliverable.badge : 'EMPTY';
-            ttHintEl.textContent = '[点击打开文件 / 所在位置]';
+            const turnPrefix = (picked.deliverable && picked.deliverable.turnNumber)
+              ? ('第 ' + picked.deliverable.turnNumber + ' 轮 · ')
+              : '';
+            const histSuffix = coreVaultDeliverables.length > 1
+              ? (' · 历史共 ' + coreVaultDeliverables.length + ' 份')
+              : '';
+            ttInfoEl.textContent = picked.deliverable ? (turnPrefix + picked.deliverable.badge + histSuffix) : 'EMPTY';
+            ttHintEl.textContent = '[点击查看产物与历史记录]';
           } else if (picked.kindType === 'swarm_star') {
             ttInfoEl.textContent = picked.occupied ? picked.worker.dept : 'STANDBY';
             ttHintEl.textContent = picked.occupied ? '[点击查看子模型 · 中键拖拽]' : '[悬停预览星槽 · 中键拖拽]';
@@ -7785,11 +8130,15 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           }
         }
 
-        // Keep outermost Deliverable Eyes strictly synced to latest-turn deliverables
+        // Keep outermost Deliverable Eyes & deliverable history vault synced cumulatively across all turns
         const realDelivs = Array.isArray(snap.deliverables) ? snap.deliverables : [];
-        const curDelivNames = coreVaultDeliverables.map(function (x) { return x.fullPath || x.file; }).join('|');
-        const nextDelivNames = realDelivs.map(function (x) { return x.fullPath || x.file; }).join('|');
-        if (curDelivNames !== nextDelivNames) {
+        const curDelivSig = coreVaultDeliverables.map(function (x) {
+          return (x.fullPath || x.file) + ':' + (x.turnNumber || '') + ':' + (x.deliveryCount || 1) + ':' + (x.badge || '');
+        }).join('|');
+        const nextDelivSig = realDelivs.map(function (x) {
+          return (x.fullPath || x.file) + ':' + (x.turnNumber || '') + ':' + (x.deliveryCount || 1) + ':' + (x.badge || '');
+        }).join('|');
+        if (curDelivSig !== nextDelivSig) {
           coreVaultDeliverables.length = 0;
           for (let d = 0; d < realDelivs.length; d++) {
             coreVaultDeliverables.push(realDelivs[d]);
@@ -7797,6 +8146,9 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           const delivTargets = syncOuterDeliverablesToActiveEyes();
           for (let dtIdx = 0; dtIdx < delivTargets.length; dtIdx++) {
             delivTargets[dtIdx].pulseBoost = 1.25;
+          }
+          if (delivModalBackdrop.classList.contains('open')) {
+            renderDeliverablesVaultList(lastFocusedDeliverableEyeSlot);
           }
         }
       }
@@ -8013,10 +8365,23 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         notifyControlStateListeners();
       }
 
+      function tryWakeToyWallpaperProtocol() {
+        try {
+          let wakeFrame = document.getElementById('ophanim-toy-wp-wake-frame');
+          if (!wakeFrame) {
+            wakeFrame = document.createElement('iframe');
+            wakeFrame.id = 'ophanim-toy-wp-wake-frame';
+            wakeFrame.style.display = 'none';
+            document.body.appendChild(wakeFrame);
+          }
+          wakeFrame.src = 'ophanim-toy-wp://wake?ts=' + Date.now();
+        } catch (err) { /* ignore */ }
+      }
+
       function requestWallpaperAction(action, wpModeOverride) {
         const chosenMode = wpModeOverride || wallpaperUiState.wallpaperMode || 'agy_live';
         wallpaperUiState.wallpaperMode = chosenMode;
-        const chosenBeam = chosenMode === 'ambient_eco' ? 'ambient' : (state.beamMode || 'tool_io');
+        const chosenBeam = chosenMode === 'ambient_eco' ? 'ambient' : (state.beamMode === 'tool_io' ? 'ambient' : (state.beamMode || 'ambient'));
         const cfgSnap = action === 'enable' ? saveCurrentUserConfig() : undefined;
         const reqBody = {
           type: 'ophanim_wallpaper_action',
@@ -8026,35 +8391,62 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           config: cfgSnap
         };
         if (action === 'enable') {
-          showToast('WALLPAPER // 正在将当前配置嵌入 Windows 桌面图标底层设为动态壁纸...');
+          showToast('WALLPAPER // 正在将当前圣轮嵌入 Windows 桌面图标底层设为动态壁纸...');
         } else if (action === 'disable') {
           showToast('WALLPAPER // 正在退出动态壁纸并恢复系统原壁纸...');
         }
 
         const baseHttp = (window.location.protocol === 'http:' || window.location.protocol === 'https:')
           ? window.location.origin
-          : 'http://127.0.0.1:18790';
-        fetch(baseHttp + '/api/wallpaper', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(reqBody)
-        }).then(function (r) { return r.json(); }).then(function (res) {
+          : 'http://127.0.0.1:18791';
+
+        function sendWpPost() {
+          return fetch(baseHttp + '/api/wallpaper', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(reqBody)
+          }).then(function (r) { return r.json(); });
+        }
+
+        function onWpRes(res) {
           updateWallpaperStatusUI(res);
+          if (!activeLocalWS || activeLocalWS.readyState !== 1) {
+            window.ophanimAgent.connectWS('ws://127.0.0.1:18791/ws');
+          }
           if (res && res.ok) {
             if (action === 'enable') {
-              showToast('WALLPAPER_ON // 动态桌面壁纸已生效（无任何悬浮按钮，随时可点取消壁纸恢复）');
+              showToast('WALLPAPER_ON // 动态桌面壁纸已生效（无需任何 Agent 桥接，随时可点取消壁纸恢复）');
             } else if (action === 'disable') {
               showToast('WALLPAPER_OFF // 已取消动态壁纸并恢复原本的桌面壁纸');
             }
           } else if (res && res.error) {
             showToast('壁纸提示：' + res.error);
           }
-        }).catch(function () {
+        }
+
+        sendWpPost().then(onWpRes).catch(function () {
           if (activeLocalWS && activeLocalWS.readyState === 1) {
             activeLocalWS.send(JSON.stringify(reqBody));
-          } else {
-            showToast('提示：本地桥接未启动，请先双击桌面 Ophanim_Sanctum.bat');
+            return;
           }
+          // Attempt automatic silent wake via registered `ophanim-toy-wp://` protocol (works if Ophanim_Wallpaper_Toy.bat ran once!)
+          tryWakeToyWallpaperProtocol();
+          let tries = 0;
+          const pollTimer = setInterval(function () {
+            tries++;
+            fetch('http://127.0.0.1:18791/api/health', { method: 'GET' })
+              .then(function (r) { if (!r.ok) throw new Error('not up'); return r.json(); })
+              .then(function () {
+                clearInterval(pollTimer);
+                sendWpPost().then(onWpRes).catch(function () {});
+              })
+              .catch(function () {
+                if (tries >= 9) {
+                  clearInterval(pollTimer);
+                  showToast('首次设为桌面壁纸请双击同目录「Ophanim_Wallpaper_Toy.bat」（零 Python / 零 Agent 依赖，运行一次后网页内直点即生效）');
+                }
+              });
+          }, 360);
         });
       }
 
@@ -8312,11 +8704,8 @@ Click patterned eye on outer ring to open file or file location.</textarea>
             const sock = new WebSocket(wsUrl);
             activeLocalWS = sock;
             sock.addEventListener('open', function () {
-              state.autoSim = false;
-              btnAutoSim.classList.remove('active');
-              streamBadge.textContent = 'LIVE·AGY';
-              showToast('LOCAL_BRIDGE // 已接入本地 Antigravity 实时会话桥接 (零假数据模式)');
-              pushEventLog('✦ WS_ONLINE', wsUrl, 'LIVE_AGY');
+              streamBadge.textContent = state.autoSim ? 'AUTO·ON' : 'TOY·WP';
+              pushEventLog('✦ WP_READY', '127.0.0.1:18791', 'WALLPAPER_HOST');
               if (IS_WALLPAPER_MODE) {
                 try { sock.send(JSON.stringify({ type: 'ophanim_wallpaper_hello' })); } catch (err) { /* ignore */ }
               }
@@ -9552,8 +9941,8 @@ Click patterned eye on outer ring to open file or file location.</textarea>
       (function checkQueryWS() {
         try {
           const params = new URLSearchParams(window.location.search);
-          const defaultWs = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + (window.location.host || '127.0.0.1:18790') + '/ws';
-          const wsParam = params.get('ws') || (window.location.protocol === 'file:' ? 'ws://127.0.0.1:18790/ws' : defaultWs);
+          const defaultWs = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + (window.location.host || '127.0.0.1:18791') + '/ws';
+          const wsParam = params.get('ws') || (window.location.protocol === 'file:' ? 'ws://127.0.0.1:18791/ws' : defaultWs);
           if (wsParam) window.ophanimAgent.connectWS(wsParam);
         } catch (err) { /* ignore */ }
       })();

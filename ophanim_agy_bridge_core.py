@@ -1626,58 +1626,84 @@ def build_conversation_snapshot(cid: str) -> dict[str, Any]:
             ),
         })
 
-    # Latest-round deliverables ONLY from this conversation's real turns!
-    deliverable_by_turn: dict[int, list[dict[str, Any]]] = {}
-    for ev in all_file_events:
-        if ev["op"] not in {"write", "link"}:
-            continue
+    # Cumulative conversation-wide deliverables (oldest -> newest tracked across ALL turns, returned newest-first
+    # up to 64 historical records so the 3D outermost eyes fill 1-by-1 and rotate FIFO while modal shows full history!)
+    runtime_state_names = {
+        "ophanim_wallpaper_state.json",
+        "ophanim_config.json",
+        "ophanim_toy_config.json",
+        "ophanim_session_meta.json",
+    }
+    deliv_events_chron = [
+        ev for ev in all_file_events
+        if ev["op"] in {"write", "link"}
+        and ev["path"].is_file()
+        and not _is_noise_file(ev["path"])
+        and ev["path"].name.lower() not in runtime_state_names
+        and "/.user_uploaded/" not in ev["path"].as_posix().lower()
+        and ("/antigravity/scratch/" not in ev["path"].as_posix().lower() or ev["linked"])
+    ]
+    deliv_events_chron.sort(
+        key=lambda e: (int(e.get("turnIdx") or 0), int(e.get("stepIndex") or 0))
+    )
+
+    cum_deliv_map: dict[str, dict[str, Any]] = {}
+    for ev in deliv_events_chron:
         p_obj = ev["path"]
-        if not p_obj.is_file() or _is_noise_file(p_obj):
-            continue
-        if "/antigravity/scratch/" in p_obj.as_posix().lower() and not ev["linked"]:
-            continue
-        deliverable_by_turn.setdefault(ev["turnIdx"], []).append(ev)
+        nk = os.path.normcase(os.path.normpath(str(p_obj)))
+        t_num = max(1, int(ev.get("turnIdx") or 1))
+        s_idx = int(ev.get("stepIndex") or 0)
+        if nk not in cum_deliv_map:
+            cum_deliv_map[nk] = {
+                "path": p_obj,
+                "firstTurn": t_num,
+                "latestTurn": t_num,
+                "latestStep": s_idx,
+                "deliveryCount": 1,
+                "linked": bool(ev.get("linked")),
+            }
+        else:
+            rec = cum_deliv_map[nk]
+            rec["path"] = p_obj
+            if (t_num, s_idx) >= (rec["latestTurn"], rec["latestStep"]):
+                if t_num != rec["latestTurn"] or ev["op"] == "write":
+                    rec["deliveryCount"] += 1
+                rec["latestTurn"] = t_num
+                rec["latestStep"] = s_idx
+            if ev.get("linked"):
+                rec["linked"] = True
+
+    sorted_cum_records = sorted(
+        cum_deliv_map.values(),
+        key=lambda r: (-int(r["latestTurn"]), -int(r["latestStep"])),
+    )
 
     deliverables: list[dict[str, Any]] = []
-    if deliverable_by_turn:
-        latest_deliv_turn = max(deliverable_by_turn.keys())
-        turn_candidates = deliverable_by_turn[latest_deliv_turn]
-        seen_deliv: set[str] = set()
-        turn_candidates_sorted = sorted(
-            turn_candidates,
-            key=lambda e: (
-                0 if _is_deliverable_candidate(e["path"], e["linked"]) else 1,
-                -int(e["stepIndex"]),
-            ),
-        )
-        for ev in turn_candidates_sorted:
-            if len(deliverables) >= 8:
-                break
-            p_obj = ev["path"]
-            nk = os.path.normcase(os.path.normpath(str(p_obj)))
-            if nk in seen_deliv:
-                continue
-            seen_deliv.add(nk)
-            try:
-                sz = p_obj.stat().st_size
-            except OSError:
-                continue
-            try:
-                siblings = [
-                    x.name for x in p_obj.parent.iterdir()
-                    if x.is_file() and x.name != p_obj.name and not _is_noise_file(x)
-                ][:8]
-            except OSError:
-                siblings = []
-            ext_up = p_obj.suffix.lstrip(".").upper() or "FILE"
-            deliverables.append({
-                "file": p_obj.name,
-                "badge": f"{ext_up} · {format_size(sz)}",
-                "dirPath": os.path.normpath(str(p_obj.parent)),
-                "fullPath": os.path.normpath(str(p_obj)),
-                "siblings": siblings,
-                "code": read_preview(p_obj, 55),
-            })
+    for rec in sorted_cum_records[:64]:
+        p_obj = rec["path"]
+        try:
+            sz = p_obj.stat().st_size
+        except OSError:
+            continue
+        try:
+            siblings = [
+                x.name for x in p_obj.parent.iterdir()
+                if x.is_file() and x.name != p_obj.name and not _is_noise_file(x)
+            ][:8]
+        except OSError:
+            siblings = []
+        ext_up = p_obj.suffix.lstrip(".").upper() or "FILE"
+        deliverables.append({
+            "file": p_obj.name,
+            "badge": f"{ext_up} · {format_size(sz)}",
+            "turnNumber": int(rec["latestTurn"]),
+            "firstTurnNumber": int(rec["firstTurn"]),
+            "deliveryCount": int(rec["deliveryCount"]),
+            "dirPath": os.path.normpath(str(p_obj.parent)),
+            "fullPath": os.path.normpath(str(p_obj)),
+            "siblings": siblings,
+            "code": read_preview(p_obj, 64),
+        })
 
     return {
         "cascadeId": cid,

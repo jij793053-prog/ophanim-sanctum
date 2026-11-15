@@ -16,7 +16,7 @@
 | 版本 | 适用人群 | 启动与生成带 LOGO 桌面快捷方式 |
 | :--- | :--- | :--- |
 | **1. 完整全能桥接版 (Full Agent Bridge Edition)** | 将自己的 AI Agent（**Google Antigravity / DeepSeek / Codex / Claude Code / Cursor**）接入 3D 圣轮实时联动 + 会话管理 + 动态壁纸 | 运行 `pip install -r requirements.txt` 后双击 `Start_Ophanim_Sanctum.bat`；双击 `Create_Desktop_Shortcut.bat` 可在桌面生成带**圣轮玫瑰星盘 LOGO** 的快捷方式 |
-| **2. 纯观赏玩具与动态壁纸版 (Toy & Wallpaper Edition)** | 不需要连接任何 AI 工具，纯粹当成解压 3D 机械圣轮把玩或设为可交互的 Windows 动态桌面壁纸 | 进入 `toy-wallpaper-edition/`：双击 `ophanim_toy_sanctum.html`（免安装），或双击 `Start_Toy_Wallpaper_App.bat` / `Create_Toy_Desktop_Shortcut.bat` |
+| **2. 纯观赏玩具与动态壁纸版 (Toy & Wallpaper Edition)** | 不需要连接任何 AI 工具、无需安装 Python，纯粹当成解压 3D 机械圣轮模板把玩或设为可交互的 Windows 动态桌面壁纸 | 进入 `toy-wallpaper-edition/`：纯网页把玩直接双击 `ophanim_toy_sanctum.html`（单文件即可运行）；需设为桌面动态壁纸时双击 `Ophanim_Wallpaper_Toy.bat`（零依赖原生挂载） |
 
 ---
 

@@ -533,20 +533,38 @@ class TurnBridgeContext:
     def emit_deliver(self, file_path: str, summary: str = "") -> None:
         p = Path(file_path)
         full_p = str(p.resolve()) if p.exists() else file_path
+        ext_up = p.suffix.lstrip(".").upper() or "FILE"
+        sz_str = f"{p.stat().st_size:,} B" if p.is_file() else "DELIV"
+        preview_txt = summary or "Agent 终稿交付产物"
+        if p.is_file() and p.suffix.lower() in {".py", ".js", ".ts", ".html", ".css", ".md", ".json", ".txt", ".bat", ".sh", ".yaml", ".yml"}:
+            try:
+                lines = p.read_text(encoding="utf-8", errors="replace").splitlines()[:60]
+                preview_txt = "\n".join(lines)
+            except Exception:
+                pass
         with _LOCK:
             doc = _load_session(self.cascade_id)
             if doc:
                 delivs = list(doc.get("deliverables") or [])
+                prev_existing = next((x for x in delivs if x.get("fullPath") == full_p or x.get("file") == (p.name or file_path)), None)
+                prev_cnt = int((prev_existing or {}).get("deliveryCount") or 0)
+                first_turn = int((prev_existing or {}).get("firstTurnNumber") or self.turn_number or 1)
                 entry = {
                     "file": p.name or file_path,
+                    "badge": f"{ext_up} · {sz_str}",
+                    "turnNumber": int(self.turn_number or 1),
+                    "firstTurnNumber": first_turn,
+                    "deliveryCount": prev_cnt + 1,
                     "fullPath": full_p,
                     "dirPath": str(p.resolve().parent) if p.exists() else "",
                     "kind": _guess_kind(p.name),
                     "summary": summary or "Agent 终稿交付产物",
+                    "code": preview_txt,
                 }
-                delivs = [x for x in delivs if x.get("file") != entry["file"]]
-                delivs.append(entry)
-                doc["deliverables"] = delivs[-12:]
+                delivs = [x for x in delivs if x.get("fullPath") != full_p and x.get("file") != entry["file"]]
+                # Store newest-first up to 64 historical deliverables
+                delivs.insert(0, entry)
+                doc["deliverables"] = delivs[:64]
                 _save_session(doc)
         _emit_payload(
             {
