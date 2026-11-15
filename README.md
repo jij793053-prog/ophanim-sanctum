@@ -12,7 +12,7 @@
 ## 实机运行画面预览 (Live Sanctuary Preview)
 
 <p align="center">
-  <img src="./assets/ophanim_live_preview.jpg" alt="Ophanim Sanctum 3D Live UI Preview" width="100%" />
+  <img src="./assets/ophanim_live_preview.png" alt="Ophanim Sanctum 3D Live UI Preview" width="100%" />
 </p>
 
 ---
