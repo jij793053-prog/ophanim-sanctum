@@ -35,7 +35,7 @@
 
 ---
 
-## 让别人的 AI Agent（DeepSeek Harness / Codex / Claude Code 等）一键复刻你的同款工作台
+## 让你的 AI Agent（DeepSeek Harness / Codex / Claude Code / Cursor 等）一键接入同款工作台
 
 如果你用的不是 Antigravity，而是 **DeepSeek Harness、OpenAI Codex、Claude Code、Cursor** 等其他本地工具，本项目内置了**通用外部 Agent 双向收发桥接引擎 (`ophanim_external_bridge.py`)**、交接文档与标准 `SKILL.md`：
 
