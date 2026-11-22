@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+from ctypes import wintypes
 import json
 import os
 from pathlib import Path
@@ -18,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import time
+from typing import Any
 import urllib.request
 
 SANCTUM_DIR = Path(__file__).resolve().parent
@@ -47,6 +50,158 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 _NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 _DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
+_WIN32_CACHE: tuple[Any, Any, Any] | None = None
+
+
+def _get_win32_dlls() -> tuple[Any, Any, Any]:
+    """Bind dedicated 64-bit `WinDLL` handles with explicit `argtypes`/`restype` (zero untyped `ctypes.windll`)."""
+    global _WIN32_CACHE
+    if _WIN32_CACHE is not None:
+        return _WIN32_CACHE
+    if os.name != "nt":
+        _WIN32_CACHE = (None, None, None)
+        return _WIN32_CACHE
+
+    u32 = ctypes.WinDLL("user32", use_last_error=True)
+    u32.GetThreadDesktop.argtypes = [wintypes.DWORD]
+    u32.GetThreadDesktop.restype = wintypes.HANDLE
+
+    u32.GetUserObjectInformationW.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    u32.GetUserObjectInformationW.restype = wintypes.BOOL
+
+    if hasattr(u32, "SetProcessDpiAwarenessContext"):
+        u32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        u32.SetProcessDpiAwarenessContext.restype = wintypes.BOOL
+    if hasattr(u32, "SetProcessDPIAware"):
+        u32.SetProcessDPIAware.argtypes = []
+        u32.SetProcessDPIAware.restype = wintypes.BOOL
+    if hasattr(u32, "GetDpiForSystem"):
+        u32.GetDpiForSystem.argtypes = []
+        u32.GetDpiForSystem.restype = wintypes.UINT
+
+    u32.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_void_p, wintypes.UINT]
+    u32.SystemParametersInfoW.restype = wintypes.BOOL
+
+    u32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+    u32.MonitorFromPoint.restype = wintypes.HMONITOR
+
+    u32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    u32.GetWindowThreadProcessId.restype = wintypes.DWORD
+
+    u32.IsWindowVisible.argtypes = [wintypes.HWND]
+    u32.IsWindowVisible.restype = wintypes.BOOL
+
+    u32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    u32.GetClassNameW.restype = ctypes.c_int
+
+    u32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    u32.GetWindowTextLengthW.restype = ctypes.c_int
+
+    u32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    u32.GetWindowTextW.restype = ctypes.c_int
+
+    u32.EnumWindows.argtypes = [ctypes.c_void_p, wintypes.LPARAM]
+    u32.EnumWindows.restype = wintypes.BOOL
+
+    u32.IsZoomed.argtypes = [wintypes.HWND]
+    u32.IsZoomed.restype = wintypes.BOOL
+
+    u32.IsIconic.argtypes = [wintypes.HWND]
+    u32.IsIconic.restype = wintypes.BOOL
+
+    u32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    u32.ShowWindow.restype = wintypes.BOOL
+
+    u32.SetWindowPos.argtypes = [
+        wintypes.HWND,
+        wintypes.HWND,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.UINT,
+    ]
+    u32.SetWindowPos.restype = wintypes.BOOL
+
+    u32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    u32.SetForegroundWindow.restype = wintypes.BOOL
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetCurrentThreadId.argtypes = []
+    k32.GetCurrentThreadId.restype = wintypes.DWORD
+
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+
+    k32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.CloseHandle.restype = wintypes.BOOL
+
+    shcore = None
+    try:
+        shcore = ctypes.WinDLL("shcore")
+        if hasattr(shcore, "GetDpiForMonitor"):
+            shcore.GetDpiForMonitor.argtypes = [
+                wintypes.HMONITOR,
+                ctypes.c_int,
+                ctypes.POINTER(ctypes.c_uint),
+                ctypes.POINTER(ctypes.c_uint),
+            ]
+            shcore.GetDpiForMonitor.restype = ctypes.c_long
+    except Exception:
+        shcore = None
+
+    _WIN32_CACHE = (u32, k32, shcore)
+    return _WIN32_CACHE
+
+
+def _atomic_write_text(dest: Path, text: str, retries: int = 5) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.parent / f".{dest.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError:
+                pass
+        last_exc: Exception | None = None
+        for attempt in range(max(1, retries)):
+            try:
+                os.replace(tmp, dest)
+                return
+            except PermissionError as exc:
+                last_exc = exc
+                time.sleep(0.02 * (attempt + 1))
+            except OSError as exc:
+                if getattr(exc, "winerror", 0) in (5, 32):
+                    last_exc = exc
+                    time.sleep(0.02 * (attempt + 1))
+                else:
+                    raise
+        if last_exc is not None:
+            raise last_exc
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
 
 def _log(msg: str) -> None:
     try:
@@ -65,15 +220,14 @@ def _current_desktop_name() -> str:
     if os.name != "nt":
         return "posix"
     try:
-        import ctypes
-
-        u32 = ctypes.windll.user32
-        k32 = ctypes.windll.kernel32
+        u32, k32, _ = _get_win32_dlls()
+        if u32 is None or k32 is None:
+            return ""
         hdesk = u32.GetThreadDesktop(k32.GetCurrentThreadId())
         if not hdesk:
             return ""
         buf = ctypes.create_unicode_buffer(256)
-        needed = ctypes.c_ulong(0)
+        needed = wintypes.DWORD(0)
         if u32.GetUserObjectInformationW(hdesk, 2, buf, 512, ctypes.byref(needed)):
             return str(buf.value or "")
     except Exception:
@@ -189,7 +343,6 @@ def ensure_daemon_running(wait_seconds: float = 6.5) -> bool:
     my_desktop = _current_desktop_name().strip().lower()
     health = _probe_daemon_health(timeout=0.55)
     if health is not None:
-        # Ensure daemon is BOTH running on interactive 'Default' desktop AND running latest API build
         need_replace = (my_desktop == "default" and health.get("desktopInteractive") is not True) or (
             not _has_upgraded_apis(timeout=0.55)
         )
@@ -279,73 +432,76 @@ def _compute_centered_window_metrics(
     always lands dead-center instead of drifting to the bottom-right!
     """
     try:
-        import ctypes
-        from ctypes import wintypes
-
-        user32 = ctypes.windll.user32
-        try:
-            user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
-        except Exception:
+        user32, _, shcore = _get_win32_dlls()
+        if user32 is not None:
             try:
-                user32.SetProcessDPIAware()
+                if hasattr(user32, "SetProcessDpiAwarenessContext"):
+                    user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+                elif hasattr(user32, "SetProcessDPIAware"):
+                    user32.SetProcessDPIAware()
             except Exception:
                 pass
 
-        rect = wintypes.RECT()
-        if user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
-            phys_left = int(rect.left)
-            phys_top = int(rect.top)
-            phys_avail_w = max(800, int(rect.right - rect.left))
-            phys_avail_h = max(600, int(rect.bottom - rect.top))
+            rect = wintypes.RECT()
+            if user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+                phys_left = int(rect.left)
+                phys_top = int(rect.top)
+                phys_avail_w = max(800, int(rect.right - rect.left))
+                phys_avail_h = max(600, int(rect.bottom - rect.top))
 
-            dpi = 96
-            try:
-                shcore = ctypes.windll.shcore
-                pt = wintypes.POINT(phys_left + phys_avail_w // 2, phys_top + phys_avail_h // 2)
-                hmon = user32.MonitorFromPoint(pt, 2)
-                dx = ctypes.c_uint(96)
-                dy = ctypes.c_uint(96)
-                if hmon and shcore.GetDpiForMonitor(hmon, 0, ctypes.byref(dx), ctypes.byref(dy)) == 0:
-                    dpi = max(96, int(dx.value))
-                else:
-                    dpi = max(96, int(user32.GetDpiForSystem()))
-            except Exception:
+                dpi = 96
                 try:
-                    dpi = max(96, int(user32.GetDpiForSystem()))
+                    pt = wintypes.POINT(phys_left + phys_avail_w // 2, phys_top + phys_avail_h // 2)
+                    hmon = user32.MonitorFromPoint(pt, 2)
+                    dx = ctypes.c_uint(96)
+                    dy = ctypes.c_uint(96)
+                    if (
+                        hmon
+                        and shcore is not None
+                        and hasattr(shcore, "GetDpiForMonitor")
+                        and shcore.GetDpiForMonitor(hmon, 0, ctypes.byref(dx), ctypes.byref(dy)) == 0
+                    ):
+                        dpi = max(96, int(dx.value))
+                    elif hasattr(user32, "GetDpiForSystem"):
+                        dpi = max(96, int(user32.GetDpiForSystem()))
                 except Exception:
-                    dpi = 96
+                    try:
+                        if hasattr(user32, "GetDpiForSystem"):
+                            dpi = max(96, int(user32.GetDpiForSystem()))
+                    except Exception:
+                        dpi = 96
 
-            scale = max(1.0, float(dpi) / 96.0)
-            dip_left = int(round(phys_left / scale))
-            dip_top = int(round(phys_top / scale))
-            dip_avail_w = max(800, int(round(phys_avail_w / scale)))
-            dip_avail_h = max(600, int(round(phys_avail_h / scale)))
+                scale = max(1.0, float(dpi) / 96.0)
+                dip_left = int(round(phys_left / scale))
+                dip_top = int(round(phys_top / scale))
+                dip_avail_w = max(800, int(round(phys_avail_w / scale)))
+                dip_avail_h = max(600, int(round(phys_avail_h / scale)))
 
-            dip_w = min(target_dip_w, int(dip_avail_w * 0.84))
-            dip_h = min(target_dip_h, int(dip_avail_h * 0.86))
-            dip_x = int(dip_left + (dip_avail_w - dip_w) // 2)
-            dip_y = int(dip_top + (dip_avail_h - dip_h) // 2)
+                dip_w = min(target_dip_w, int(dip_avail_w * 0.84))
+                dip_h = min(target_dip_h, int(dip_avail_h * 0.86))
+                dip_x = int(dip_left + (dip_avail_w - dip_w) // 2)
+                dip_y = int(dip_top + (dip_avail_h - dip_h) // 2)
 
-            phys_w = min(int(phys_avail_w * 0.92), int(round(dip_w * scale)))
-            phys_h = min(int(phys_avail_h * 0.92), int(round(dip_h * scale)))
-            phys_x = int(phys_left + (phys_avail_w - phys_w) // 2)
-            phys_y = int(phys_top + (phys_avail_h - phys_h) // 2)
+                phys_w = min(int(phys_avail_w * 0.92), int(round(dip_w * scale)))
+                phys_h = min(int(phys_avail_h * 0.92), int(round(dip_h * scale)))
+                phys_x = int(phys_left + (phys_avail_w - phys_w) // 2)
+                phys_y = int(phys_top + (phys_avail_h - phys_h) // 2)
 
-            return {
-                "scale": scale,
-                "dip_x": dip_x,
-                "dip_y": dip_y,
-                "dip_w": dip_w,
-                "dip_h": dip_h,
-                "dip_work_left": dip_left,
-                "dip_work_top": dip_top,
-                "dip_work_right": dip_left + dip_avail_w,
-                "dip_work_bottom": dip_top + dip_avail_h,
-                "phys_x": phys_x,
-                "phys_y": phys_y,
-                "phys_w": phys_w,
-                "phys_h": phys_h,
-            }
+                return {
+                    "scale": scale,
+                    "dip_x": dip_x,
+                    "dip_y": dip_y,
+                    "dip_w": dip_w,
+                    "dip_h": dip_h,
+                    "dip_work_left": dip_left,
+                    "dip_work_top": dip_top,
+                    "dip_work_right": dip_left + dip_avail_w,
+                    "dip_work_bottom": dip_top + dip_avail_h,
+                    "phys_x": phys_x,
+                    "phys_y": phys_y,
+                    "phys_w": phys_w,
+                    "phys_h": phys_h,
+                }
     except Exception:
         pass
     return {
@@ -366,13 +522,15 @@ def _compute_centered_window_metrics(
 
 
 def _preset_chromium_centered_prefs(profile_dir: Path, m: dict[str, int | float]) -> None:
-    """Update Chromium Default/Preferences in logical DIPs so `--app` opens dead-center."""
+    """Atomically update Chromium Default/Preferences in logical DIPs so `--app` opens dead-center."""
     prefs_file = profile_dir / "Default" / "Preferences"
     try:
         prefs_file.parent.mkdir(parents=True, exist_ok=True)
         data: dict = {}
         if prefs_file.is_file():
-            data = json.loads(prefs_file.read_text(encoding="utf-8", errors="replace"))
+            loaded = json.loads(prefs_file.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(loaded, dict):
+                data = loaded
         x = int(m["dip_x"])
         y = int(m["dip_y"])
         w = int(m["dip_w"])
@@ -396,21 +554,19 @@ def _preset_chromium_centered_prefs(profile_dir: Path, m: dict[str, int | float]
                 for k in list(app_wp.keys()):
                     app_wp[k] = dict(placement)
                 app_wp[f"_127.0.0.1_{PORT}"] = dict(placement)
-        prefs_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        _atomic_write_text(prefs_file, json.dumps(data, ensure_ascii=False), retries=5)
     except Exception as exc:
         _log(f"Preferences center preset skipped: {exc}")
 
 
 def _get_hwnd_exe_basename(hwnd: int) -> str:
     """Return lowercase executable filename (e.g. 'msedge.exe') owning `hwnd`."""
-    if os.name != "nt":
+    if os.name != "nt" or not hwnd:
         return ""
     try:
-        import ctypes
-        from ctypes import wintypes
-
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
+        user32, kernel32, _ = _get_win32_dlls()
+        if user32 is None or kernel32 is None:
+            return ""
         pid = wintypes.DWORD(0)
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if not pid.value:
@@ -436,10 +592,9 @@ def _snapshot_non_ophanim_browser_hwnds() -> set[int]:
     if os.name != "nt":
         return existing
     try:
-        import ctypes
-        from ctypes import wintypes
-
-        user32 = ctypes.windll.user32
+        user32, _, _ = _get_win32_dlls()
+        if user32 is None:
+            return existing
         WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
         def _cb(hwnd: int, _lparam: int) -> bool:
@@ -456,14 +611,13 @@ def _snapshot_non_ophanim_browser_hwnds() -> set[int]:
                 t_buf = ctypes.create_unicode_buffer(ln + 2)
                 user32.GetWindowTextW(hwnd, t_buf, ln + 2)
                 title = (t_buf.value or "").strip()
-            # Keep an already-open standalone OPHANIM UI `--app` window eligible for re-centering,
-            # while locking out ALL other windows (Antigravity IDE, regular browser windows, etc.)!
             if exe_name in ("msedge.exe", "chrome.exe") and title == "OPHANIM UI":
                 return True
             existing.add(int(hwnd))
             return True
 
-        user32.EnumWindows(WNDENUMPROC(_cb), 0)
+        cb_fn = WNDENUMPROC(_cb)
+        user32.EnumWindows(ctypes.cast(cb_fn, ctypes.c_void_p), 0)
     except Exception:
         pass
     return existing
@@ -478,10 +632,9 @@ def _center_spawned_ophanim_window_win32(
     if os.name != "nt":
         return
     try:
-        import ctypes
-        from ctypes import wintypes
-
-        user32 = ctypes.windll.user32
+        user32, _, _ = _get_win32_dlls()
+        if user32 is None:
+            return
         WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
         deadline = time.monotonic() + wait_sec
 
@@ -497,7 +650,6 @@ def _center_spawned_ophanim_window_win32(
                 if cls_buf.value != "Chrome_WidgetWin_1":
                     return True
                 exe_name = _get_hwnd_exe_basename(h_int)
-                # STRICT PROCESS GUARD: ONLY standalone Edge/Chrome browser, NEVER Antigravity/Electron!
                 if exe_name not in ("msedge.exe", "chrome.exe"):
                     return True
                 ln = user32.GetWindowTextLengthW(hwnd)
@@ -517,12 +669,13 @@ def _center_spawned_ophanim_window_win32(
                     matched_hwnds.append((h_int, exe_name, raw_title))
                 return True
 
-            user32.EnumWindows(WNDENUMPROC(_cb), 0)
+            cb_fn = WNDENUMPROC(_cb)
+            user32.EnumWindows(ctypes.cast(cb_fn, ctypes.c_void_p), 0)
             if matched_hwnds:
                 hwnd_target, exe_target, title_target = matched_hwnds[0]
                 if user32.IsZoomed(hwnd_target) or user32.IsIconic(hwnd_target):
                     user32.ShowWindow(hwnd_target, 9)  # SW_RESTORE
-                user32.SetWindowPos(hwnd_target, 0, phys_x, phys_y, phys_w, phys_h, 0x0040)  # SWP_SHOWWINDOW
+                user32.SetWindowPos(hwnd_target, None, phys_x, phys_y, phys_w, phys_h, 0x0040)  # SWP_SHOWWINDOW
                 user32.SetForegroundWindow(hwnd_target)
                 _log(
                     f"Centered standalone {exe_target} window {title_target!r} (hwnd={hwnd_target}) "

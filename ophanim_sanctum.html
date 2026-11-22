@@ -1076,6 +1076,11 @@
     .wp-act-btn.danger-outline {
       color: var(--ink-primary);
     }
+    .wp-mode-btn:disabled, .wp-act-btn:disabled {
+      opacity: 0.45;
+      cursor: wait;
+      pointer-events: none;
+    }
 
     /* Keep #liturgical-header (OPHANIM title + Ezekiel 1:16-18 verse) visible in Desktop Wallpaper Mode! */
     body.wallpaper-mode #top-left-toolbar,
@@ -2606,6 +2611,10 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         <button type="button" class="wp-mode-btn active" data-wp-mode="agy_live" title="根据 Antigravity 工作环境实时刷新（跟随上方所选：调用收发 / 工作随动 / 常驻流光）">Antigravity 实时随动</button>
         <button type="button" class="wp-mode-btn" data-wp-mode="ambient_eco" title="独立常驻流光 + 节能帧率控制，不吃电脑性能">常驻流光 (低耗节能)</button>
       </div>
+      <div class="wp-mode-row" style="grid-template-columns:1fr;">
+        <button type="button" id="btn-wp-auto-follow" class="wp-mode-btn active" title="开启后：只要有任意对话处于「工作中」，壁纸圣轮将自动跳至该正在工作的对话实时呈现，不受面板查看已完成对话影响">● 壁纸自动跳至工作中对话</button>
+      </div>
+      <div id="codex-wp-track-label" style="display:none;font-family:var(--font-mono);font-size:9.5px;color:var(--ink-muted);letter-spacing:0.04em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
       <div class="wp-mode-row">
         <button type="button" id="btn-enable-wallpaper" class="wp-act-btn primary-active" title="以当前全部参数配置作为动态桌面壁纸，并自动移除所有面板与隐藏按钮">✦ 设为壁纸</button>
         <button type="button" id="btn-disable-wallpaper" class="wp-act-btn danger-outline" title="关闭动态壁纸并立即恢复电脑原本的静态壁纸">✕ 取消壁纸</button>
@@ -2982,18 +2991,71 @@ Click patterned eye on outer ring to open file or file location.</textarea>
 
       const camera = new THREE.PerspectiveCamera(state.fov, window.innerWidth / window.innerHeight, 0.04, 1200);
 
-      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: true,
+        powerPreference: IS_WALLPAPER_MODE ? (IS_WALLPAPER_ECO ? 'low-power' : 'default') : 'high-performance'
+      });
+      const dpr = IS_WALLPAPER_MODE
+        ? Math.min(window.devicePixelRatio || 1, IS_WALLPAPER_ECO ? 1.0 : 1.25)
+        : Math.min(window.devicePixelRatio || 1, 2);
       renderer.setPixelRatio(dpr);
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.setClearColor(0x050507, 0.0);
       container.appendChild(renderer.domElement);
+
+      let wpOccluded = false;
+      let webglContextLost = false;
+      let renderLoopStarted = false;
+      let renderLoopPaused = false;
+      let animRafId = 0;
+      let lastMs = performance.now();
+      let lastWpRenderMs = 0;
+      let hudCanvasDirty = false;
+
+      function shouldPauseRenderLoop() {
+        if (webglContextLost) return true;
+        if (IS_WALLPAPER_MODE && (wpOccluded || document.hidden)) return true;
+        return false;
+      }
+
+      function syncRenderLoopState() {
+        const wantPause = shouldPauseRenderLoop();
+        if (wantPause) {
+          renderLoopPaused = true;
+          if (animRafId) {
+            cancelAnimationFrame(animRafId);
+            animRafId = 0;
+          }
+        } else if (renderLoopPaused || (renderLoopStarted && !animRafId)) {
+          renderLoopPaused = false;
+          if (renderLoopStarted && !animRafId) {
+            lastMs = performance.now();
+            lastWpRenderMs = 0;
+            animRafId = requestAnimationFrame(animate);
+          }
+        }
+      }
+
+      renderer.domElement.addEventListener('webglcontextlost', function (e) {
+        e.preventDefault();
+        webglContextLost = true;
+        syncRenderLoopState();
+      }, false);
+
+      renderer.domElement.addEventListener('webglcontextrestored', function () {
+        webglContextLost = false;
+        renderer.setPixelRatio(dpr);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        syncRenderLoopState();
+      }, false);
 
       function resizeHudCanvas() {
         hudCanvas.width = Math.floor(window.innerWidth * dpr);
         hudCanvas.height = Math.floor(window.innerHeight * dpr);
         hudCanvas.style.width = window.innerWidth + 'px';
         hudCanvas.style.height = window.innerHeight + 'px';
+        hudCanvasDirty = false;
       }
       resizeHudCanvas();
 
@@ -3450,14 +3512,38 @@ Click patterned eye on outer ring to open file or file location.</textarea>
       const sharedUnitBoxGeom = new THREE.BoxGeometry(1, 1, 1);
       const sharedUnitBoxEdges = new THREE.EdgesGeometry(sharedUnitBoxGeom, 15);
 
-      // Real-time High-DPI Dynamic Text Renderer (1280x900 = 6.25x texel density + maxAnisotropy!)
+      // Real-time High-DPI Dynamic Text Renderer (1280x900 = 6.25x texel density + maxAnisotropy; reduced in wallpaper mode!)
       // Renders ANY real filename & live code string passed at runtime (local agent / WebSocket / UI)!
+      function computeSlabContentKey(fileData, schemaKey) {
+        const file = String((fileData && fileData.file) || '');
+        const kind = String((fileData && fileData.kind) || (file.endsWith('.json') ? 'JSON' : 'PY'));
+        const codeStr = Array.isArray(fileData && fileData.code) ? fileData.code.join('\n') : String((fileData && fileData.code) || '');
+        let h = 2166136261;
+        const len = codeStr.length;
+        const headLen = Math.min(len, 512);
+        for (let i = 0; i < headLen; i++) {
+          h ^= codeStr.charCodeAt(i);
+          h = Math.imul(h, 16777619);
+        }
+        if (len > headLen) {
+          const step = Math.max(1, Math.floor((len - headLen) / 512));
+          for (let i = headLen; i < len; i += step) {
+            h ^= codeStr.charCodeAt(i);
+            h = Math.imul(h, 16777619);
+          }
+        }
+        return schemaKey + '|' + kind + '|' + file + '|' + len + '|' + (h >>> 0);
+      }
+
       function renderLoadedSlabTexture(fileObj) {
         const th = STRUCTURAL_THEMES[state.schema];
+        const texScale = IS_WALLPAPER_MODE ? (IS_WALLPAPER_ECO ? 0.5 : 0.625) : 1.0;
         const W = 1280, H = 900;
         const c = document.createElement('canvas');
-        c.width = W; c.height = H;
+        c.width = Math.round(W * texScale);
+        c.height = Math.round(H * texScale);
         const ctx = c.getContext('2d');
+        if (texScale !== 1.0) ctx.scale(texScale, texScale);
 
         ctx.fillStyle = th.slabAccentBg;
         ctx.fillRect(0, 0, W, H);
@@ -3535,29 +3621,48 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         }
 
         const tex = new THREE.CanvasTexture(c);
-        tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+        tex.anisotropy = IS_WALLPAPER_MODE
+          ? Math.min(4, renderer.capabilities.getMaxAnisotropy())
+          : renderer.capabilities.getMaxAnisotropy();
         tex.minFilter = THREE.LinearMipmapLinearFilter;
         tex.magFilter = THREE.LinearFilter;
         return tex;
       }
 
-      function populateSlabWithFile(slab, fileData) {
+      function populateSlabWithFile(slab, fileData, forceRedraw) {
+        const nextFile = String((fileData && fileData.file) || '');
+        const nextKind = (fileData && fileData.kind) || (nextFile.endsWith('.json') ? 'JSON' : 'PY');
+        const nextCode = Array.isArray(fileData && fileData.code) ? fileData.code.join('\n') : String((fileData && fileData.code) || '');
+        const nextKey = computeSlabContentKey({ file: nextFile, kind: nextKind, code: nextCode }, state.schema);
+        const canReuseTexture = !forceRedraw &&
+          slab.populated &&
+          Boolean(slab.labelTex) &&
+          slab.contentKey === nextKey &&
+          Boolean(slab.loadedFaceMat) &&
+          slab.loadedFaceMat.map === slab.labelTex;
+
         slab.populated = true;
-        slab.file = fileData.file;
-        slab.fullPath = fileData.fullPath || '';
-        slab.kind = fileData.kind || (fileData.file.endsWith('.json') ? 'JSON' : 'PY');
-        slab.code = Array.isArray(fileData.code) ? fileData.code.join('\n') : String(fileData.code);
+        slab.file = nextFile;
+        slab.fullPath = (fileData && fileData.fullPath) || '';
+        slab.kind = nextKind;
+        slab.code = nextCode;
         slab.tierLabel = 'STRUCTURAL FILE SLAB // 已装载思考薄板 (丝滑正视)';
 
-        if (slab.labelTex) slab.labelTex.dispose();
-        slab.labelTex = renderLoadedSlabTexture(slab);
+        if (!canReuseTexture) {
+          if (slab.labelTex) {
+            slab.labelTex.dispose();
+            slab.labelTex = null;
+          }
+          slab.labelTex = renderLoadedSlabTexture(slab);
+          slab.contentKey = nextKey;
 
-        if (!slab.loadedFaceMat) {
-          slab.loadedEdgeMat = new THREE.MeshBasicMaterial({ color: 0xf2f2f5 });
-          slab.loadedFaceMat = new THREE.MeshBasicMaterial({ map: slab.labelTex });
-        } else {
-          slab.loadedFaceMat.map = slab.labelTex;
-          slab.loadedFaceMat.needsUpdate = true;
+          if (!slab.loadedFaceMat) {
+            slab.loadedEdgeMat = new THREE.MeshBasicMaterial({ color: 0xf2f2f5 });
+            slab.loadedFaceMat = new THREE.MeshBasicMaterial({ map: slab.labelTex });
+          } else {
+            slab.loadedFaceMat.map = slab.labelTex;
+            slab.loadedFaceMat.needsUpdate = true;
+          }
         }
         slab.loadedEdgeMat.color.set(STRUCTURAL_THEMES[state.schema].slabBorder);
 
@@ -3784,24 +3889,57 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           const cur = (panel.typeProgress < 1.0 && i === visLines.length - 1) ? ' █' : '';
           ctx.fillText(visLines[i].slice(0, 48) + cur, 52 * sc, y);
         }
+        panel.lastSchema = state.schema;
+        panel.lastRenderedChars = visChars;
         panel.texture.needsUpdate = true;
       }
 
       function setOuterPanelContent(panel, item, initTypeProg) {
         const has = Boolean(item && item.file && String(item.file).trim());
-        panel.hasContent = has;
-        panel.file = has ? String(item.file).trim() : '';
-        panel.fullPath = has ? String(item.fullPath || '') : '';
-        panel.role = has ? (item.role || 'CORE_MOD') : '';
-        panel.code = has
+        const nextFile = has ? String(item.file).trim() : '';
+        const nextFullPath = has ? String(item.fullPath || '') : '';
+        const nextRole = has ? (item.role || 'CORE_MOD') : '';
+        const nextCode = has
           ? (Array.isArray(item.code) ? item.code.join('\n') : String(item.code || ''))
           : '';
-        panel.typeProgress = has ? (typeof initTypeProg === 'number' ? initTypeProg : 1.0) : 1.0;
-        panel.mesh.visible = has;
-        panel.meshBack.visible = has;
-        if (has) {
-          renderFlushOuterBezelCanvas(panel);
+        const targetTypeProg = (!has || IS_WALLPAPER_MODE)
+          ? 1.0
+          : (typeof initTypeProg === 'number' ? initTypeProg : 1.0);
+
+        if (!has) {
+          if (!panel.hasContent && !panel.mesh.visible) return;
+          panel.hasContent = false;
+          panel.file = '';
+          panel.fullPath = '';
+          panel.role = '';
+          panel.code = '';
+          panel.typeProgress = 1.0;
+          panel.lastRenderedChars = -1;
+          panel.mesh.visible = false;
+          panel.meshBack.visible = false;
+          return;
         }
+
+        const isUnchanged = panel.hasContent &&
+          panel.file === nextFile &&
+          panel.role === nextRole &&
+          panel.code === nextCode &&
+          panel.lastSchema === state.schema &&
+          panel.typeProgress >= 1.0 &&
+          targetTypeProg >= 1.0;
+
+        panel.hasContent = true;
+        panel.file = nextFile;
+        panel.fullPath = nextFullPath;
+        panel.role = nextRole;
+        panel.code = nextCode;
+        panel.mesh.visible = true;
+        panel.meshBack.visible = true;
+        if (isUnchanged) return;
+
+        panel.typeProgress = targetTypeProg;
+        panel.lastRenderedChars = -1;
+        renderFlushOuterBezelCanvas(panel);
       }
 
       function assignDeliverableToOuterEye(eyeSlot, delivItem) {
@@ -3872,10 +4010,14 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           const pGeomBack = createFlushBezelScreenGeometry(rBase - 0.13, rBase + 0.24, -0.09, -0.39, cAng, baySpan, 26, true);
 
           const canvas = document.createElement('canvas');
-          canvas.width = 1280; canvas.height = 336;
+          const bezelScale = IS_WALLPAPER_MODE ? (IS_WALLPAPER_ECO ? 0.5 : 0.625) : 1.0;
+          canvas.width = Math.round(1280 * bezelScale);
+          canvas.height = Math.round(336 * bezelScale);
           const ctx = canvas.getContext('2d');
           const tex = new THREE.CanvasTexture(canvas);
-          tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+          tex.anisotropy = IS_WALLPAPER_MODE
+            ? Math.min(4, renderer.capabilities.getMaxAnisotropy())
+            : renderer.capabilities.getMaxAnisotropy();
 
           const mat = new THREE.MeshBasicMaterial({
             map: tex, side: THREE.DoubleSide,
@@ -3899,7 +4041,9 @@ Click patterned eye on outer ring to open file or file location.</textarea>
             mesh: pMeshFront, meshBack: pMeshBack, anchor: anchor, canvas: canvas, ctx: ctx, texture: tex,
             file: item.file, role: item.role, kind: 'CORE_INLAID_DUAL', code: item.code,
             tierLabel: 'OUTER DUAL-SIDE INLAY // 最外环正反双面内嵌窗',
-            typeProgress: 1.0
+            typeProgress: 1.0,
+            lastSchema: '',
+            lastRenderedChars: -1
           };
           pMeshFront.userData.interactable = panelObj;
           pMeshBack.userData.interactable = panelObj;
@@ -4375,24 +4519,27 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         refreshActiveEyeCountReadout();
       }
 
+      function disposeSlabLabelTexture(sl) {
+        if (sl.labelTex) {
+          sl.labelTex.dispose();
+          sl.labelTex = null;
+        }
+        if (sl.loadedFaceMat) {
+          sl.loadedFaceMat.map = null;
+        }
+        sl.contentKey = '';
+      }
+
       function applySlabLayerSelection() {
         // Collect currently loaded file payloads before switching layers
         const savedFiles = [];
         allSlabCartridges.forEach(function (sl) {
           if (sl.populated) {
-            savedFiles.push({ file: sl.file, kind: sl.kind, code: sl.code });
+            savedFiles.push({ file: sl.file, fullPath: sl.fullPath || '', kind: sl.kind, code: sl.code });
           }
-          // Reset slab to clean empty state on inactive layers
+          // Reset slab to clean empty state on inactive layers (disposing GPU texture!)
           if (!activeSlabRingMask[sl.ringIdx]) {
-            sl.populated = false;
-            sl.mesh.material = occluderMat;
-            sl.wire.material = emptySlabWireMat;
-            const idxHit = interactableMeshes.indexOf(sl.hitMesh);
-            if (idxHit !== -1) interactableMeshes.splice(idxHit, 1);
-            if (sl.faceHitMesh) {
-              const idxFace = interactableMeshes.indexOf(sl.faceHitMesh);
-              if (idxFace !== -1) interactableMeshes.splice(idxFace, 1);
-            }
+            clearSingleSlab(sl);
           }
         });
 
@@ -4425,8 +4572,10 @@ Click patterned eye on outer ring to open file or file location.</textarea>
       function clearSingleSlab(sl) {
         sl.populated = false;
         sl.file = '';
+        sl.fullPath = '';
         sl.kind = '';
         sl.code = '';
+        disposeSlabLabelTexture(sl);
         sl.mesh.material = occluderMat;
         sl.wire.material = emptySlabWireMat;
         const idxHit = interactableMeshes.indexOf(sl.hitMesh);
@@ -4590,7 +4739,8 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         const fg = isPaper ? '#111216' : '#f2f2f5';
         const muted = isPaper ? '#555862' : '#9ca0ac';
 
-        const W = 1024, H = 308, sc = 1.6;
+        const cardScale = IS_WALLPAPER_MODE ? 0.5 : 1.0;
+        const W = Math.round(1024 * cardScale), H = Math.round(308 * cardScale), sc = 1.6 * cardScale;
         const c = document.createElement('canvas');
         c.width = W; c.height = H;
         const ctx = c.getContext('2d');
@@ -4626,7 +4776,9 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         }
 
         const tex = new THREE.CanvasTexture(c);
-        tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+        tex.anisotropy = IS_WALLPAPER_MODE
+          ? Math.min(4, renderer.capabilities.getMaxAnisotropy())
+          : renderer.capabilities.getMaxAnisotropy();
         return tex;
       }
 
@@ -5060,6 +5212,7 @@ Click patterned eye on outer ring to open file or file location.</textarea>
       const recentLogs = [];
 
       function pushEventLog(tag, file, detail) {
+        if (IS_WALLPAPER_MODE) return;
         recentLogs.unshift('<div class="log-entry"><span class="op-tag">' + tag + '</span> ' + file + ' <span style="opacity:0.65">[' + detail + ']</span></div>');
         if (recentLogs.length > 12) recentLogs.pop();
         logContainer.innerHTML = recentLogs.join('');
@@ -7066,7 +7219,6 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         if (picked) {
           hoveredItem = picked;
           if (IS_WALLPAPER_MODE) {
-            tooltipEl.classList.remove('visible');
             return;
           }
           container.style.cursor = 'pointer';
@@ -7107,9 +7259,11 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           tooltipEl.classList.add('visible');
         } else {
           hoveredItem = null;
-          const ringHoverHits = raycaster.intersectObjects(middleDragRingColliders, false);
-          container.style.cursor = camCtrl.isDragging ? 'grabbing' : (ringHoverHits.length > 0 ? 'grab' : 'crosshair');
-          tooltipEl.classList.remove('visible');
+          if (!IS_WALLPAPER_MODE) {
+            const ringHoverHits = raycaster.intersectObjects(middleDragRingColliders, false);
+            container.style.cursor = camCtrl.isDragging ? 'grabbing' : (ringHoverHits.length > 0 ? 'grab' : 'crosshair');
+            tooltipEl.classList.remove('visible');
+          }
         }
       }
 
@@ -7141,6 +7295,9 @@ Click patterned eye on outer ring to open file or file location.</textarea>
 
       const starDragHitPt = new THREE.Vector3();
       const camForwardTmp = new THREE.Vector3();
+      const panCamRightTmp = new THREE.Vector3();
+      const panCamUpTmp = new THREE.Vector3();
+      const panCamBackTmp = new THREE.Vector3();
       const arcballCenterScreen = new THREE.Vector3();
       const arcballCamRight = new THREE.Vector3();
       const arcballCamUp = new THREE.Vector3();
@@ -7277,6 +7434,7 @@ Click patterned eye on outer ring to open file or file location.</textarea>
       window.addEventListener('blur', function () { isMiddleMouseHeld = false; });
       document.addEventListener('visibilitychange', function () {
         if (document.hidden) isMiddleMouseHeld = false;
+        if (IS_WALLPAPER_MODE) syncRenderLoopState();
       });
 
       domCanvas.addEventListener('mousedown', function (e) {
@@ -7390,11 +7548,9 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         } else {
           const fovRad = (camera.fov * Math.PI) / 180.0;
           const worldPerPixel = (2.0 * camCtrl.radius * Math.tan(fovRad * 0.5)) / Math.max(1, window.innerHeight);
-          const right = new THREE.Vector3();
-          const up = new THREE.Vector3();
-          camera.matrix.extractBasis(right, up, new THREE.Vector3());
-          camCtrl.targetPan.addScaledVector(right, -dx * worldPerPixel);
-          camCtrl.targetPan.addScaledVector(up, dy * worldPerPixel);
+          camera.matrix.extractBasis(panCamRightTmp, panCamUpTmp, panCamBackTmp);
+          camCtrl.targetPan.addScaledVector(panCamRightTmp, -dx * worldPerPixel);
+          camCtrl.targetPan.addScaledVector(panCamUpTmp, dy * worldPerPixel);
           camCtrl.panOffset.copy(camCtrl.targetPan);
         }
       });
@@ -7517,11 +7673,9 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           const midX = (e.touches[0].clientX + e.touches[1].clientX) * 0.5;
           const midY = (e.touches[0].clientY + e.touches[1].clientY) * 0.5;
           const panScale = camCtrl.radius * 0.0014;
-          const right = new THREE.Vector3();
-          const up = new THREE.Vector3();
-          camera.matrix.extractBasis(right, up, new THREE.Vector3());
-          camCtrl.targetPan.addScaledVector(right, -(midX - camCtrl.lastPointer.x) * panScale);
-          camCtrl.targetPan.addScaledVector(up, (midY - camCtrl.lastPointer.y) * panScale);
+          camera.matrix.extractBasis(panCamRightTmp, panCamUpTmp, panCamBackTmp);
+          camCtrl.targetPan.addScaledVector(panCamRightTmp, -(midX - camCtrl.lastPointer.x) * panScale);
+          camCtrl.targetPan.addScaledVector(panCamUpTmp, (midY - camCtrl.lastPointer.y) * panScale);
           camCtrl.lastPointer.x = midX;
           camCtrl.lastPointer.y = midY;
         }
@@ -7545,6 +7699,9 @@ Click patterned eye on outer ring to open file or file location.</textarea>
       let prevWpBtnMask = 0;
       let lastWpSphereAckMs = 0;
       let wpLeftMovedBeyondClick = false;
+      let lastWpHoverRaycastMs = 0;
+      let lastWpHoverX = -9999;
+      let lastWpHoverY = -9999;
 
       function tryAcknowledgeWallpaperWhiteSphereClick(cx, cy, vw, vh) {
         const nowMs = performance.now();
@@ -7571,7 +7728,7 @@ Click patterned eye on outer ring to open file or file location.</textarea>
       }
 
       function handleWallpaperPointer(ptr) {
-        if (!IS_WALLPAPER_MODE || !ptr) return;
+        if (!IS_WALLPAPER_MODE || !ptr || wpOccluded) return;
         const vw = Math.max(1, window.innerWidth || 1920);
         const vh = Math.max(1, window.innerHeight || 1080);
         const cx = Number(ptr.nx || 0.5) * vw;
@@ -7657,6 +7814,8 @@ Click patterned eye on outer ring to open file or file location.</textarea>
             const wasDraggingRingWp = (camCtrl.dragMode === 'drag_ring' && Boolean(camCtrl.draggedRingInfo));
             camCtrl.isDragging = false;
             camCtrl.draggedRingInfo = null;
+            lastWpHoverX = -9999;
+            lastWpHoverY = -9999;
             if (wasDraggingRingWp) {
               persistIfPreviouslySaved();
             }
@@ -7685,11 +7844,9 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           } else if (camCtrl.dragMode === 'pan') {
             const fovRad = (camera.fov * Math.PI) / 180.0;
             const worldPerPixel = (2.0 * camCtrl.radius * Math.tan(fovRad * 0.5)) / Math.max(1, vh);
-            const right = new THREE.Vector3();
-            const up = new THREE.Vector3();
-            camera.matrix.extractBasis(right, up, new THREE.Vector3());
-            camCtrl.targetPan.addScaledVector(right, -dx * worldPerPixel);
-            camCtrl.targetPan.addScaledVector(up, dy * worldPerPixel);
+            camera.matrix.extractBasis(panCamRightTmp, panCamUpTmp, panCamBackTmp);
+            camCtrl.targetPan.addScaledVector(panCamRightTmp, -dx * worldPerPixel);
+            camCtrl.targetPan.addScaledVector(panCamUpTmp, dy * worldPerPixel);
             camCtrl.panOffset.copy(camCtrl.targetPan);
           }
           return;
@@ -7697,10 +7854,19 @@ Click patterned eye on outer ring to open file or file location.</textarea>
 
         // 4. Passive hover on desktop: file slabs turn smoothly toward mouse, 4-pointed stars stay untouched, zero modals!
         if (onDesk && !onIcon) {
-          updateHoverRaycast(cx, cy);
+          const nowHoverMs = performance.now();
+          const movedPx = Math.hypot(cx - lastWpHoverX, cy - lastWpHoverY);
+          if (movedPx > 2.0 && (nowHoverMs - lastWpHoverRaycastMs) >= 55) {
+            lastWpHoverRaycastMs = nowHoverMs;
+            lastWpHoverX = cx;
+            lastWpHoverY = cy;
+            updateHoverRaycast(cx, cy);
+          }
         } else {
-          hoveredItem = null;
+          if (hoveredItem !== null) hoveredItem = null;
           isMouseNearCore = false;
+          lastWpHoverX = -9999;
+          lastWpHoverY = -9999;
         }
       }
 
@@ -7942,8 +8108,8 @@ Click patterned eye on outer ring to open file or file location.</textarea>
       // Re-render all dynamic 3D text canvases once Google Web Fonts finish loading so glyphs are 100% vector-crisp!
       if (document.fonts && document.fonts.ready) {
         document.fonts.ready.then(function () {
-          allSlabCartridges.forEach(function (sl) { if (sl.populated) populateSlabWithFile(sl, sl); });
-          outerBezelPanels.forEach(function (pnl) { renderFlushOuterBezelCanvas(pnl); });
+          allSlabCartridges.forEach(function (sl) { if (sl.populated) populateSlabWithFile(sl, sl, true); });
+          outerBezelPanels.forEach(function (pnl) { if (pnl.hasContent) renderFlushOuterBezelCanvas(pnl); });
           swarmStarNodes.forEach(function (st, idx) {
             if (st.cardMat && st.cardMat.map) st.cardMat.map.dispose();
             st.cardMat.map = renderSwarmWorkerCardCanvas(st.worker, idx + 1, st.occupied);
@@ -7990,33 +8156,52 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         }
       });
 
+      function syncSlabsToActivePool(realSlabs) {
+        const activePool = getActiveSlabPool();
+        const populatedTargets = [];
+        const assignedPairs = [];
+        const assignedSet = new Set();
+        if (Array.isArray(realSlabs) && realSlabs.length > 0 && activePool.length > 0) {
+          const nLoad = Math.min(realSlabs.length, activePool.length);
+          const stride = Math.max(1, Math.floor(activePool.length / nLoad));
+          for (let k = 0; k < nLoad; k++) {
+            const sl = activePool[(k * stride) % activePool.length];
+            if (!assignedSet.has(sl)) {
+              assignedSet.add(sl);
+              assignedPairs.push([sl, realSlabs[k]]);
+            }
+          }
+        }
+        for (let i = 0; i < allSlabCartridges.length; i++) {
+          const sl = allSlabCartridges[i];
+          if (!assignedSet.has(sl) && (sl.populated || sl.labelTex)) {
+            clearSingleSlab(sl);
+          }
+        }
+        for (let j = 0; j < assignedPairs.length; j++) {
+          const sl = assignedPairs[j][0];
+          populateSlabWithFile(sl, assignedPairs[j][1]);
+          populatedTargets.push(sl);
+        }
+        return populatedTargets;
+      }
+
       // Apply a real Antigravity conversation snapshot cleanly to all 3D tiers (slabs, outer bezels, deliverable eyes, subagents)
       function applyConversationSnapshotTo3D(snap, fireRevealBeams) {
         if (!snap || typeof snap !== 'object') return;
         convTransition.liveConvStatus = snap.status === 'running' ? 'running' : 'idle';
         streamBadge.textContent = snap.status === 'running' ? 'LIVE·WORK' : 'LIVE·IDLE';
 
-        // 1. Clear & populate inner file slabs strictly from this conversation
-        allSlabCartridges.forEach(clearSingleSlab);
+        // 1. Diff & populate inner file slabs strictly from this conversation (reusing unchanged slab textures!)
         const realSlabs = Array.isArray(snap.slabs) ? snap.slabs : [];
-        const activePool = getActiveSlabPool();
-        const populatedTargets = [];
-        if (realSlabs.length > 0 && activePool.length > 0) {
-          const nLoad = Math.min(realSlabs.length, activePool.length);
-          const stride = Math.max(1, Math.floor(activePool.length / nLoad));
-          for (let k = 0; k < nLoad; k++) {
-            const sl = activePool[(k * stride) % activePool.length];
-            populateSlabWithFile(sl, realSlabs[k]);
-            populatedTargets.push(sl);
-          }
-        }
+        const populatedTargets = syncSlabsToActivePool(realSlabs);
 
         // 2. Pack outermost double-sided bezel panels contiguously (0 at start -> up to 15 full-circle latest blocks, zero gaps!)
         const realOuters = Array.isArray(snap.outerFiles) ? snap.outerFiles : [];
         for (let p = 0; p < outerBezelPanels.length; p++) {
           const pnl = outerBezelPanels[p];
           const item = realOuters[p] || null;
-          setOuterPanelContent(pnl, item, fireRevealBeams && item ? 0.12 : 1.0);
+          setOuterPanelContent(pnl, item, (!IS_WALLPAPER_MODE && fireRevealBeams && item) ? 0.12 : 1.0);
         }
 
         // 3. Clear & populate outermost patterned Deliverable Eyes strictly from this conversation's LATEST turn!
@@ -8083,21 +8268,8 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         const realWorkers = Array.isArray(snap.workers) ? snap.workers : [];
         setSwarmWorkerCount(realWorkers.length, realWorkers);
 
-        const activePool = getActiveSlabPool();
         const realSlabs = Array.isArray(snap.slabs) ? snap.slabs : [];
-        const curSlabSig = activePool.filter(function (s) { return s.populated; }).map(function (s) { return s.file; }).join('|');
-        const nextSlabSig = realSlabs.map(function (x) { return x.file; }).join('|');
-        if (curSlabSig !== nextSlabSig) {
-          allSlabCartridges.forEach(clearSingleSlab);
-          if (realSlabs.length > 0 && activePool.length > 0) {
-            const nLoad = Math.min(realSlabs.length, activePool.length);
-            const stride = Math.max(1, Math.floor(activePool.length / nLoad));
-            for (let k = 0; k < nLoad; k++) {
-              const sl = activePool[(k * stride) % activePool.length];
-              populateSlabWithFile(sl, realSlabs[k]);
-            }
-          }
-        }
+        syncSlabsToActivePool(realSlabs);
 
         const realOuters = Array.isArray(snap.outerFiles) ? snap.outerFiles : [];
         for (let p = 0; p < outerBezelPanels.length; p++) {
@@ -8167,15 +8339,44 @@ Click patterned eye on outer ring to open file or file location.</textarea>
 
       const wallpaperUiState = {
         active: false,
+        actionInFlight: false,
         wallpaperMode: 'agy_live',
         beamMode: 'tool_io',
+        autoFollowWorking: true,
+        wallpaperCascadeId: '',
+        wallpaperTitle: '',
+        wallpaperStatus: 'idle',
         originalWallpaper: ''
       };
+      let wallpaperActionInFlight = false;
+      let wpActionViaWs = false;
+      let wpActionSafetyTimer = null;
       const controlSyncListeners = [];
       function notifyControlStateListeners() {
         for (let i = 0; i < controlSyncListeners.length; i++) {
           try { controlSyncListeners[i](); } catch (err) { /* ignore */ }
         }
+      }
+
+      function setWallpaperActionInFlight(flag, viaWs) {
+        wallpaperActionInFlight = Boolean(flag);
+        wpActionViaWs = wallpaperActionInFlight && Boolean(viaWs);
+        wallpaperUiState.actionInFlight = wallpaperActionInFlight;
+        if (wpActionSafetyTimer) {
+          clearTimeout(wpActionSafetyTimer);
+          wpActionSafetyTimer = null;
+        }
+        if (wallpaperActionInFlight && wpActionViaWs) {
+          wpActionSafetyTimer = setTimeout(function () {
+            wpActionSafetyTimer = null;
+            setWallpaperActionInFlight(false, false);
+          }, 15000);
+        }
+        const btnEn = document.getElementById('btn-enable-wallpaper');
+        const btnDis = document.getElementById('btn-disable-wallpaper');
+        if (btnEn) btnEn.disabled = wallpaperActionInFlight;
+        if (btnDis) btnDis.disabled = wallpaperActionInFlight;
+        notifyControlStateListeners();
       }
 
       function applyPyramidMode(nextMode, silent) {
@@ -8332,7 +8533,15 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         if (typeof st.active === 'boolean') wallpaperUiState.active = st.active;
         if (st.wallpaperMode) wallpaperUiState.wallpaperMode = st.wallpaperMode;
         if (st.beamMode) wallpaperUiState.beamMode = st.beamMode;
+        if (typeof st.autoFollowWorking === 'boolean') wallpaperUiState.autoFollowWorking = st.autoFollowWorking;
+        if (typeof st.wallpaperCascadeId === 'string') wallpaperUiState.wallpaperCascadeId = st.wallpaperCascadeId;
+        if (typeof st.wallpaperTitle === 'string') wallpaperUiState.wallpaperTitle = st.wallpaperTitle;
+        if (typeof st.wallpaperStatus === 'string') wallpaperUiState.wallpaperStatus = st.wallpaperStatus;
         if (typeof st.originalWallpaper === 'string') wallpaperUiState.originalWallpaper = st.originalWallpaper;
+
+        if (wpActionViaWs && wallpaperActionInFlight && (typeof st.active === 'boolean' || typeof st.ok === 'boolean')) {
+          setWallpaperActionInFlight(false, false);
+        }
 
         const badge = document.getElementById('codex-wp-status-badge');
         if (badge) {
@@ -8340,13 +8549,70 @@ Click patterned eye on outer ring to open file or file location.</textarea>
             ? (wallpaperUiState.wallpaperMode === 'ambient_eco' ? '运行中 · 常驻节能' : '运行中 · 实时随动')
             : '未启用';
         }
-        document.querySelectorAll('#codex-wallpaper-card .wp-mode-btn').forEach(function (b) {
+        document.querySelectorAll('#codex-wallpaper-card .wp-mode-btn[data-wp-mode]').forEach(function (b) {
           b.classList.toggle('active', b.getAttribute('data-wp-mode') === wallpaperUiState.wallpaperMode);
         });
+        const followBtn = document.getElementById('btn-wp-auto-follow');
+        if (followBtn) {
+          followBtn.classList.toggle('active', wallpaperUiState.autoFollowWorking);
+          followBtn.textContent = wallpaperUiState.autoFollowWorking
+            ? '● 壁纸自动跳至工作中对话'
+            : '○ 壁纸锁定当前选中对话';
+        }
+        const trackEl = document.getElementById('codex-wp-track-label');
+        if (trackEl) {
+          if (wallpaperUiState.active && wallpaperUiState.wallpaperTitle) {
+            const stTag = wallpaperUiState.wallpaperStatus === 'running' ? '● 工作中' : '✓ 已完成';
+            trackEl.style.display = 'block';
+            trackEl.textContent = '壁纸当前圣轮: [' + stTag + '] ' + wallpaperUiState.wallpaperTitle;
+          } else {
+            trackEl.style.display = 'none';
+          }
+        }
         notifyControlStateListeners();
       }
 
+      function setWallpaperAutoFollow(enabled) {
+        const nextVal = Boolean(enabled);
+        wallpaperUiState.autoFollowWorking = nextVal;
+        updateWallpaperStatusUI({});
+        const reqBody = {
+          type: 'ophanim_wallpaper_action',
+          action: 'set_auto_follow',
+          autoFollowWorking: nextVal
+        };
+        const isHttpOrigin = window.location.protocol === 'http:' || window.location.protocol === 'https:';
+        if (!isHttpOrigin && activeLocalWS && activeLocalWS.readyState === 1) {
+          try {
+            activeLocalWS.send(JSON.stringify(reqBody));
+            return;
+          } catch (err) { /* fall through to HTTP */ }
+        }
+        const baseHttp = isHttpOrigin ? window.location.origin : 'http://127.0.0.1:18790';
+        const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timerId = ctrl ? setTimeout(function () { ctrl.abort(); }, 8000) : null;
+        fetch(baseHttp + '/api/wallpaper', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(reqBody),
+          signal: ctrl ? ctrl.signal : undefined
+        }).then(function (r) { return r.json(); }).then(function (res) {
+          updateWallpaperStatusUI(res);
+          showToast(nextVal
+            ? 'WALLPAPER_AUTO_FOLLOW // 已开启：有任意对话工作中时，壁纸圣轮将自动跳转呈现'
+            : 'WALLPAPER_MANUAL // 已关闭自动跳转：壁纸将严格锁定当前选中的对话');
+        }).catch(function () {
+          showToast('提示：壁纸跟随开关同步超时或本地桥接未响应');
+        }).finally(function () {
+          if (timerId) clearTimeout(timerId);
+        });
+      }
+
       function requestWallpaperAction(action, wpModeOverride) {
+        if (wallpaperActionInFlight) {
+          showToast('WALLPAPER // 上一次壁纸操作正在执行，请稍候...');
+          return;
+        }
         const chosenMode = wpModeOverride || wallpaperUiState.wallpaperMode || 'agy_live';
         wallpaperUiState.wallpaperMode = chosenMode;
         const chosenBeam = chosenMode === 'ambient_eco' ? 'ambient' : (state.beamMode || 'tool_io');
@@ -8356,6 +8622,7 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           action: action,
           wallpaperMode: chosenMode,
           beamMode: chosenBeam,
+          autoFollowWorking: wallpaperUiState.autoFollowWorking,
           config: cfgSnap
         };
         if (action === 'enable') {
@@ -8364,13 +8631,26 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           showToast('WALLPAPER // 正在退出动态壁纸并恢复系统原壁纸...');
         }
 
-        const baseHttp = (window.location.protocol === 'http:' || window.location.protocol === 'https:')
-          ? window.location.origin
-          : 'http://127.0.0.1:18790';
+        const isHttpOrigin = window.location.protocol === 'http:' || window.location.protocol === 'https:';
+        if (!isHttpOrigin && activeLocalWS && activeLocalWS.readyState === 1) {
+          setWallpaperActionInFlight(true, true);
+          try {
+            activeLocalWS.send(JSON.stringify(reqBody));
+            return;
+          } catch (err) {
+            setWallpaperActionInFlight(false, false);
+          }
+        }
+
+        setWallpaperActionInFlight(true, false);
+        const baseHttp = isHttpOrigin ? window.location.origin : 'http://127.0.0.1:18790';
+        const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timerId = ctrl ? setTimeout(function () { ctrl.abort(); }, 15000) : null;
         fetch(baseHttp + '/api/wallpaper', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(reqBody)
+          body: JSON.stringify(reqBody),
+          signal: ctrl ? ctrl.signal : undefined
         }).then(function (r) { return r.json(); }).then(function (res) {
           updateWallpaperStatusUI(res);
           if (res && res.ok) {
@@ -8382,14 +8662,21 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           } else if (res && res.error) {
             showToast('壁纸提示：' + res.error);
           }
-        }).catch(function () {
-          if (activeLocalWS && activeLocalWS.readyState === 1) {
-            activeLocalWS.send(JSON.stringify(reqBody));
+        }).catch(function (err) {
+          if (err && err.name === 'AbortError') {
+            showToast('WALLPAPER_TIMEOUT // 壁纸操作响应超时，请稍候查看状态，切勿重复点击');
           } else {
-            showToast('提示：本地桥接未启动，请先双击桌面 Ophanim_Sanctum.bat');
+            showToast('提示：本地桥接未启动或请求失败，请确认 Ophanim_Sanctum.bat 正在运行');
           }
+        }).finally(function () {
+          if (timerId) clearTimeout(timerId);
+          setWallpaperActionInFlight(false, false);
         });
       }
+
+      const WS_RECONNECT_STEPS_MS = [1000, 2000, 4000, 8000, 15000];
+      let wsReconnectAttempt = 0;
+      let wsReconnectTimer = null;
 
       // Public SDK for Local Deployment (Quota Dashboard + File Actions + /swarm + I/O + Session Transition + Settings Sync)
       window.ophanimAgent = {
@@ -8413,6 +8700,7 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         acknowledgeCompletions: function (silent) { acknowledgeAllCompletions(Boolean(silent)); },
         toggleCompletionPreview: function () { return toggleCompletionPreview(); },
         requestWallpaperAction: function (action, wpMode) { requestWallpaperAction(action, wpMode); },
+        setWallpaperAutoFollow: function (enabled) { setWallpaperAutoFollow(enabled); },
         setWallpaperModeSelection: function (wpMode) {
           wallpaperUiState.wallpaperMode = wpMode === 'ambient_eco' ? 'ambient_eco' : 'agy_live';
           updateWallpaperStatusUI({});
@@ -8579,7 +8867,7 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           dispatchSwarmExchange(workerIndex, direction);
         },
         updateQuota: function (qData) {
-          if (!qData) return;
+          if (!qData || IS_WALLPAPER_MODE) return;
           quotaTelemetry.externalOverride = true;
           if (typeof qData.usedPct === 'number') {
             quotaTelemetry.usedPct = Math.max(0, Math.min(100, qData.usedPct));
@@ -8640,11 +8928,23 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         },
         connectWS: function (wsUrl) {
           if (!wsUrl) return;
+          if (wsReconnectTimer) {
+            clearTimeout(wsReconnectTimer);
+            wsReconnectTimer = null;
+          }
           try {
             if (activeLocalWS) activeLocalWS.close();
-            const sock = new WebSocket(wsUrl);
+            const finalWsUrl = (IS_WALLPAPER_MODE && wsUrl.indexOf('wallpaper=1') === -1)
+              ? (wsUrl + (wsUrl.indexOf('?') === -1 ? '?wallpaper=1' : '&wallpaper=1'))
+              : wsUrl;
+            const sock = new WebSocket(finalWsUrl);
             activeLocalWS = sock;
             sock.addEventListener('open', function () {
+              wsReconnectAttempt = 0;
+              if (IS_WALLPAPER_MODE && wpOccluded) {
+                wpOccluded = false;
+                syncRenderLoopState();
+              }
               state.autoSim = false;
               btnAutoSim.classList.remove('active');
               streamBadge.textContent = 'LIVE·AGY';
@@ -8660,6 +8960,17 @@ Click patterned eye on outer ring to open file or file location.</textarea>
             sock.addEventListener('message', function (msg) {
               try {
                 const payload = JSON.parse(msg.data);
+                if (payload && (payload.type === 'wp_visibility' || payload.type === 'wp_vis')) {
+                  if (IS_WALLPAPER_MODE) {
+                    if (typeof payload.occluded === 'boolean') {
+                      wpOccluded = payload.occluded;
+                    } else if (typeof payload.visible === 'boolean') {
+                      wpOccluded = !payload.visible;
+                    }
+                    syncRenderLoopState();
+                  }
+                  return;
+                }
                 if (payload && payload.type === 'wp_ptr') {
                   handleWallpaperPointer(payload);
                   return;
@@ -8699,9 +9010,15 @@ Click patterned eye on outer ring to open file or file location.</textarea>
             sock.addEventListener('close', function () {
               if (activeLocalWS === sock) {
                 activeLocalWS = null;
-                setTimeout(function () {
+                const stepIdx = Math.min(wsReconnectAttempt, WS_RECONNECT_STEPS_MS.length - 1);
+                const baseDelay = WS_RECONNECT_STEPS_MS[stepIdx];
+                wsReconnectAttempt++;
+                const jitter = 0.8 + Math.random() * 0.4; // ±20% jitter
+                const delayMs = Math.round(baseDelay * jitter);
+                wsReconnectTimer = setTimeout(function () {
+                  wsReconnectTimer = null;
                   if (!activeLocalWS) window.ophanimAgent.connectWS(wsUrl);
-                }, 2600);
+                }, delayMs);
               }
             });
           } catch (err) { /* ignore */ }
@@ -9135,6 +9452,7 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           schema: state.schema,
           beamMode: state.beamMode,
           pyramidMode: state.pyramidMode,
+          wallpaperAutoFollow: wallpaperUiState.autoFollowWorking,
           scriptureSizeMult: state.scriptureSizeMult,
           scriptureBrightMult: state.scriptureBrightMult,
           swarmCount: state.swarmCount,
@@ -9372,6 +9690,10 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         occluderMat.visible = true;
         if (typeof cfg.hudVisible === 'boolean') state.hudVisible = cfg.hudVisible;
         if (typeof cfg.ornamentalVisible === 'boolean') state.ornamentalVisible = cfg.ornamentalVisible;
+        if (typeof cfg.wallpaperAutoFollow === 'boolean') {
+          wallpaperUiState.autoFollowWorking = cfg.wallpaperAutoFollow;
+          updateWallpaperStatusUI({});
+        }
         syncPanelVisibilityUI();
 
         // 5. Spatial Star Offsets & Outer Ring Quaternions
@@ -9860,12 +10182,18 @@ Click patterned eye on outer ring to open file or file location.</textarea>
       const btnAckCompEl = document.getElementById('btn-ack-completion');
       if (btnAckCompEl) btnAckCompEl.addEventListener('click', function () { acknowledgeAllCompletions(false); });
 
-      document.querySelectorAll('#codex-wallpaper-card .wp-mode-btn').forEach(function (btn) {
+      document.querySelectorAll('#codex-wallpaper-card .wp-mode-btn[data-wp-mode]').forEach(function (btn) {
         btn.addEventListener('click', function () {
           wallpaperUiState.wallpaperMode = btn.getAttribute('data-wp-mode') || 'agy_live';
           updateWallpaperStatusUI({});
         });
       });
+      const btnWpAutoFollowEl = document.getElementById('btn-wp-auto-follow');
+      if (btnWpAutoFollowEl) {
+        btnWpAutoFollowEl.addEventListener('click', function () {
+          setWallpaperAutoFollow(!wallpaperUiState.autoFollowWorking);
+        });
+      }
       const btnEnableWpEl = document.getElementById('btn-enable-wallpaper');
       if (btnEnableWpEl) {
         btnEnableWpEl.addEventListener('click', function () {
@@ -10333,8 +10661,33 @@ Click patterned eye on outer ring to open file or file location.</textarea>
       }
 
       function drawSpatialHud(dt) {
+        const hudReady = state.topologyOverlay && state.bootPhase !== 'dormant' && !(state.bootPhase === 'awakening' && state.bootTime < 1.55);
+        if (!hudReady) {
+          if (hudCanvasDirty) {
+            hudCtx.clearRect(0, 0, hudCanvas.width, hudCanvas.height);
+            hudCanvasDirty = false;
+          }
+          return;
+        }
+
+        const wantAlpha = (hoveredItem && hoveredItem.anchor) ? 1.0 : 0.0;
+        const hasActiveGuide = Boolean(
+          (camCtrl.dragMode === 'drag_star' && camCtrl.draggedStar) ||
+          (camCtrl.isDragging && camCtrl.dragMode === 'drag_ring' && camCtrl.draggedRingInfo)
+        );
+        if (IS_WALLPAPER_MODE) {
+          if (wantAlpha <= 0 && hudReticleAlpha <= 0.02 && !hasActiveGuide) {
+            hudReticleAlpha = 0.0;
+            if (hudCanvasDirty) {
+              hudCtx.clearRect(0, 0, hudCanvas.width, hudCanvas.height);
+              hudCanvasDirty = false;
+            }
+            return;
+          }
+        }
+
         hudCtx.clearRect(0, 0, hudCanvas.width, hudCanvas.height);
-        if (!state.topologyOverlay || state.bootPhase === 'dormant' || (state.bootPhase === 'awakening' && state.bootTime < 1.55)) return;
+        hudCanvasDirty = true;
 
         const th = STRUCTURAL_THEMES[state.schema];
         hudCtx.save();
@@ -10347,8 +10700,10 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         const cy = (-tmpProj.y * 0.5 + 0.5) * vh;
 
         // Silky interpolated lock-on reticle (NEVER 0-frame jump!)
-        const wantAlpha = (hoveredItem && hoveredItem.anchor) ? 1.0 : 0.0;
         hudReticleAlpha += (wantAlpha - hudReticleAlpha) * Math.min(1.0, dt * 14.0);
+        if (wantAlpha <= 0 && hudReticleAlpha <= 0.02) {
+          hudReticleAlpha = 0.0;
+        }
 
         if (hoveredItem && hoveredItem.anchor) {
           hoveredItem.anchor.getWorldPosition(tmpWPos);
@@ -10391,46 +10746,48 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           hudCtx.stroke();
         }
 
-        // Subtle HUD label over Outermost Ring Patterned Deliverable Eyes
-        for (let d = 0; d < outerDeliverableEyes.length; d++) {
-          const de = outerDeliverableEyes[d];
-          if (!de.deliverable) continue;
-          de.anchor.getWorldPosition(tmpWPos);
-          tmpProj.copy(tmpWPos).project(camera);
-          if (tmpProj.z >= 1.0) continue;
-          const sx = (tmpProj.x * 0.5 + 0.5) * vw;
-          const sy = (-tmpProj.y * 0.5 + 0.5) * vh;
-          hudCtx.fillStyle = th.hudStroke + '0.68)';
-          hudCtx.textAlign = 'center';
-          hudCtx.fillText('✦ 交付瞳#' + (de.eyeSlotIdx + 1), sx, sy - 18);
-        }
-
-        // Faint Carbon -> Gemini Star dashed bus lines & labels
-        for (let i = 0; i < swarmStarNodes.length; i++) {
-          const st = swarmStarNodes[i];
-          if (!st.visibleSlot) continue;
-          st.group.getWorldPosition(tmpWPos);
-          tmpProj.copy(tmpWPos).project(camera);
-          if (tmpProj.z >= 1.0) continue;
-          const sx = (tmpProj.x * 0.5 + 0.5) * vw;
-          const sy = (-tmpProj.y * 0.5 + 0.5) * vh;
-
-          if (st.occupied) {
-            hudCtx.strokeStyle = th.hudStroke + '0.22)';
-            hudCtx.setLineDash([3, 5]);
-            hudCtx.beginPath();
-            hudCtx.moveTo(cx + (sx - cx) * 0.12, cy + (sy - cy) * 0.12);
-            hudCtx.lineTo(sx, sy);
-            hudCtx.stroke();
-            hudCtx.setLineDash([]);
-
-            hudCtx.fillStyle = th.hudStroke + '0.84)';
+        if (!IS_WALLPAPER_MODE) {
+          // Subtle HUD label over Outermost Ring Patterned Deliverable Eyes
+          for (let d = 0; d < outerDeliverableEyes.length; d++) {
+            const de = outerDeliverableEyes[d];
+            if (!de.deliverable) continue;
+            de.anchor.getWorldPosition(tmpWPos);
+            tmpProj.copy(tmpWPos).project(camera);
+            if (tmpProj.z >= 1.0) continue;
+            const sx = (tmpProj.x * 0.5 + 0.5) * vw;
+            const sy = (-tmpProj.y * 0.5 + 0.5) * vh;
+            hudCtx.fillStyle = th.hudStroke + '0.68)';
             hudCtx.textAlign = 'center';
-            hudCtx.fillText('✦ ' + st.worker.id, sx, sy - 34);
-          } else {
-            hudCtx.fillStyle = th.hudStroke + '0.42)';
-            hudCtx.textAlign = 'center';
-            hudCtx.fillText('✦ STAR_0' + (i + 1), sx, sy - 32);
+            hudCtx.fillText('✦ 交付瞳#' + (de.eyeSlotIdx + 1), sx, sy - 18);
+          }
+
+          // Faint Carbon -> Gemini Star dashed bus lines & labels
+          for (let i = 0; i < swarmStarNodes.length; i++) {
+            const st = swarmStarNodes[i];
+            if (!st.visibleSlot) continue;
+            st.group.getWorldPosition(tmpWPos);
+            tmpProj.copy(tmpWPos).project(camera);
+            if (tmpProj.z >= 1.0) continue;
+            const sx = (tmpProj.x * 0.5 + 0.5) * vw;
+            const sy = (-tmpProj.y * 0.5 + 0.5) * vh;
+
+            if (st.occupied) {
+              hudCtx.strokeStyle = th.hudStroke + '0.22)';
+              hudCtx.setLineDash([3, 5]);
+              hudCtx.beginPath();
+              hudCtx.moveTo(cx + (sx - cx) * 0.12, cy + (sy - cy) * 0.12);
+              hudCtx.lineTo(sx, sy);
+              hudCtx.stroke();
+              hudCtx.setLineDash([]);
+
+              hudCtx.fillStyle = th.hudStroke + '0.84)';
+              hudCtx.textAlign = 'center';
+              hudCtx.fillText('✦ ' + st.worker.id, sx, sy - 34);
+            } else {
+              hudCtx.fillStyle = th.hudStroke + '0.42)';
+              hudCtx.textAlign = 'center';
+              hudCtx.fillText('✦ STAR_0' + (i + 1), sx, sy - 32);
+            }
           }
         }
 
@@ -10545,20 +10902,26 @@ Click patterned eye on outer ring to open file or file location.</textarea>
       }
 
       let smoothedHoverBrake = 1.0;
-      let lastMs = performance.now();
-      let lastEcoRenderMs = 0;
       let masterPhaseDeg = 0;
       let autoCycleStep = 0;
 
       pushEventLog('✦ READY', 'system_idle', 'ONLINE');
 
       function animate(nowMs) {
-        requestAnimationFrame(animate);
-        if (IS_WALLPAPER_ECO && !camCtrl.isDragging && !hoveredItem && (nowMs - lastEcoRenderMs) < 23.5) {
+        animRafId = 0;
+        if (shouldPauseRenderLoop()) {
+          renderLoopPaused = true;
           return;
         }
-        lastEcoRenderMs = nowMs;
-        const dt = Math.min(0.05, (nowMs - lastMs) * 0.001);
+        animRafId = requestAnimationFrame(animate);
+        if (IS_WALLPAPER_MODE) {
+          const minIntervalMs = (IS_WALLPAPER_ECO && !camCtrl.isDragging && !hoveredItem) ? 47.5 : 31.0;
+          if (lastWpRenderMs > 0 && (nowMs - lastWpRenderMs) < minIntervalMs) {
+            return;
+          }
+          lastWpRenderMs = nowMs;
+        }
+        const dt = Math.min(0.05, Math.max(0.0, (nowMs - lastMs) * 0.001));
         lastMs = nowMs;
         state.elapsed += dt;
 
@@ -11094,11 +11457,16 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           }
         }
 
-        for (let p = 0; p < outerBezelPanels.length; p++) {
-          const pnl = outerBezelPanels[p];
-          if (pnl.hasContent && pnl.typeProgress < 1.0) {
-            pnl.typeProgress = Math.min(1.0, pnl.typeProgress + dt * 0.85);
-            renderFlushOuterBezelCanvas(pnl);
+        if (!IS_WALLPAPER_MODE) {
+          for (let p = 0; p < outerBezelPanels.length; p++) {
+            const pnl = outerBezelPanels[p];
+            if (pnl.hasContent && pnl.typeProgress < 1.0) {
+              pnl.typeProgress = Math.min(1.0, pnl.typeProgress + dt * 0.85);
+              const nextVisChars = Math.floor(String(pnl.code || '').length * Math.min(1.0, pnl.typeProgress));
+              if (pnl.typeProgress >= 1.0 || nextVisChars !== pnl.lastRenderedChars) {
+                renderFlushOuterBezelCanvas(pnl);
+              }
+            }
           }
         }
 
@@ -11375,61 +11743,68 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         renderer.render(scene, camera);
         drawSpatialHud(dt);
 
-        // Sample time-series charts smoothly
-        const avgYawDeg = (sumYaw / Math.max(1, visGazeEyeCount)) * 57.2958;
-        const avgPitchDeg = (sumPitch / Math.max(1, visGazeEyeCount)) * 57.2958;
+        if (!IS_WALLPAPER_MODE) {
+          // Sample time-series charts smoothly
+          const avgYawDeg = (sumYaw / Math.max(1, visGazeEyeCount)) * 57.2958;
+          const avgPitchDeg = (sumPitch / Math.max(1, visGazeEyeCount)) * 57.2958;
 
-        if (state.elapsed >= nextChartSampleAt) {
-          nextChartSampleAt = state.elapsed + 0.14;
-          const normFlux = Math.min(1.0, activeBeams / 16.0);
-          fluxHistory.push(normFlux);
-          if (fluxHistory.length > 64) fluxHistory.shift();
+          if (state.elapsed >= nextChartSampleAt) {
+            nextChartSampleAt = state.elapsed + 0.14;
+            const normFlux = Math.min(1.0, activeBeams / 16.0);
+            fluxHistory.push(normFlux);
+            if (fluxHistory.length > 64) fluxHistory.shift();
 
-          gazeWaveHistory.push(Math.max(-1, Math.min(1, (avgYawDeg + avgPitchDeg * 0.6) / 42.0)));
-          if (gazeWaveHistory.length > 64) gazeWaveHistory.shift();
+            gazeWaveHistory.push(Math.max(-1, Math.min(1, (avgYawDeg + avgPitchDeg * 0.6) / 42.0)));
+            if (gazeWaveHistory.length > 64) gazeWaveHistory.shift();
 
-          if (!quotaTelemetry.externalOverride && state.autoSim) {
-            const swarmFactor = 1.0 + state.swarmCount * 0.35;
-            const instantBurn = (0.18 + normFlux * 0.55) * swarmFactor;
-            quotaTelemetry.burnRateTokPerSec = Math.round((860 + activeBeams * 185) * swarmFactor);
-            quotaTelemetry.peakTokPerSec = Math.max(quotaTelemetry.peakTokPerSec, quotaTelemetry.burnRateTokPerSec);
-            quotaTelemetry.rateHistory.push(quotaTelemetry.burnRateTokPerSec);
-            if (quotaTelemetry.rateHistory.length > 56) quotaTelemetry.rateHistory.shift();
-            pushSmoothVelocitySample(quotaTelemetry.burnRateTokPerSec, null);
-            quotaTelemetry.usedPct += instantBurn * 0.045;
-            if (quotaTelemetry.usedPct > 89.0) quotaTelemetry.usedPct = 24.5;
-            quotaTelemetry.history.push(quotaTelemetry.usedPct);
-            if (quotaTelemetry.history.length > 56) quotaTelemetry.history.shift();
+            if (!quotaTelemetry.externalOverride && state.autoSim) {
+              const swarmFactor = 1.0 + state.swarmCount * 0.35;
+              const instantBurn = (0.18 + normFlux * 0.55) * swarmFactor;
+              quotaTelemetry.burnRateTokPerSec = Math.round((860 + activeBeams * 185) * swarmFactor);
+              quotaTelemetry.peakTokPerSec = Math.max(quotaTelemetry.peakTokPerSec, quotaTelemetry.burnRateTokPerSec);
+              quotaTelemetry.rateHistory.push(quotaTelemetry.burnRateTokPerSec);
+              if (quotaTelemetry.rateHistory.length > 56) quotaTelemetry.rateHistory.shift();
+              pushSmoothVelocitySample(quotaTelemetry.burnRateTokPerSec, null);
+              quotaTelemetry.usedPct += instantBurn * 0.045;
+              if (quotaTelemetry.usedPct > 89.0) quotaTelemetry.usedPct = 24.5;
+              quotaTelemetry.history.push(quotaTelemetry.usedPct);
+              if (quotaTelemetry.history.length > 56) quotaTelemetry.history.shift();
 
-            const remM = ((1.0 - quotaTelemetry.usedPct / 100.0) * 2.0).toFixed(2);
-            quotaUsedPctEl.textContent = quotaTelemetry.usedPct.toFixed(1) + '%';
-            quotaRemTokensEl.textContent = remM + 'M / 2.00M';
-            quotaRateLabelEl.textContent = formatTokPerSecLabel(quotaTelemetry.burnRateTokPerSec, quotaTelemetry.peakTokPerSec);
+              const remM = ((1.0 - quotaTelemetry.usedPct / 100.0) * 2.0).toFixed(2);
+              quotaUsedPctEl.textContent = quotaTelemetry.usedPct.toFixed(1) + '%';
+              quotaRemTokensEl.textContent = remM + 'M / 2.00M';
+              quotaRateLabelEl.textContent = formatTokPerSecLabel(quotaTelemetry.burnRateTokPerSec, quotaTelemetry.peakTokPerSec);
+            }
           }
+
+          if (state.ornamentalVisible) {
+            drawQuotaLineChart();
+            drawVelocitySpectrum(effSpeed);
+            drawLissajousScope(state.elapsed, effSpeed);
+            drawFluxAndGazeWave();
+
+            const g0 = ringAssemblies[1].gimbal.quaternion;
+            gyroQLabelEl.textContent = 'q=[' + g0.w.toFixed(2) + ', ' + g0.x.toFixed(2) + 'i]';
+            const sxSign = avgYawDeg >= 0 ? '+' : '';
+            const sySign = avgPitchDeg >= 0 ? '+' : '';
+            gazeAngleLabelEl.textContent = 'θ=(' + sxSign + Math.round(avgYawDeg) + '°, ' + sySign + Math.round(avgPitchDeg) + '°)';
+            quatValEl.textContent = String(loadedSlabCount).padStart(2, '0') + ' / ' + String(totalActiveSlabs).padStart(3, '0') + ' LOADED';
+            xwValEl.textContent = String(state.swarmCount).padStart(2, '0') + ' / ' + String(visibleStarTotal).padStart(2, '0') + ' STARS';
+            gazeValEl.textContent = String(activeDelivEyeCount).padStart(2, '0') + ' / ' + String(visOuterEyeSlots).padStart(2, '0') + ' SIGILS';
+            beamCountValEl.textContent = String(activeBeams).padStart(2, '0') + ' ACTIVE';
+          }
+
+          telPhase.textContent = masterPhaseDeg.toFixed(1).padStart(5, '0') + '°';
+          telDist.textContent = camCtrl.radius.toFixed(1) + ' CUBITS';
         }
-
-        if (state.ornamentalVisible) {
-          drawQuotaLineChart();
-          drawVelocitySpectrum(effSpeed);
-          drawLissajousScope(state.elapsed, effSpeed);
-          drawFluxAndGazeWave();
-
-          const g0 = ringAssemblies[1].gimbal.quaternion;
-          gyroQLabelEl.textContent = 'q=[' + g0.w.toFixed(2) + ', ' + g0.x.toFixed(2) + 'i]';
-          const sxSign = avgYawDeg >= 0 ? '+' : '';
-          const sySign = avgPitchDeg >= 0 ? '+' : '';
-          gazeAngleLabelEl.textContent = 'θ=(' + sxSign + Math.round(avgYawDeg) + '°, ' + sySign + Math.round(avgPitchDeg) + '°)';
-          quatValEl.textContent = String(loadedSlabCount).padStart(2, '0') + ' / ' + String(totalActiveSlabs).padStart(3, '0') + ' LOADED';
-          xwValEl.textContent = String(state.swarmCount).padStart(2, '0') + ' / ' + String(visibleStarTotal).padStart(2, '0') + ' STARS';
-          gazeValEl.textContent = String(activeDelivEyeCount).padStart(2, '0') + ' / ' + String(visOuterEyeSlots).padStart(2, '0') + ' SIGILS';
-          beamCountValEl.textContent = String(activeBeams).padStart(2, '0') + ' ACTIVE';
-        }
-
-        telPhase.textContent = masterPhaseDeg.toFixed(1).padStart(5, '0') + '°';
-        telDist.textContent = camCtrl.radius.toFixed(1) + ' CUBITS';
       }
 
-      requestAnimationFrame(animate);
+      renderLoopStarted = true;
+      if (!shouldPauseRenderLoop()) {
+        animRafId = requestAnimationFrame(animate);
+      } else {
+        renderLoopPaused = true;
+      }
     })();
   </script>
 </body>

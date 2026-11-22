@@ -134,8 +134,14 @@
   let composerSendMode = 'queue';
   let isSending = false;
   let lastSnapshot = null;
+  const MAX_TRACKED_CIDS = 200;
+  const MAX_SEEN_COMPLETED_KEYS = 200;
+  const MAX_EXPANDED_TURN_KEYS = 200;
+  const MAX_LOCAL_ATT_PATH_KEYS = 100;
+
   const expandedTurnKeys = new Set();
   const lastSeenTurnNumByCid = {};
+  const maxCompletedTurnByCid = {};
   let pendingScrollTurnKey = '';
 
   // Shared attachment state (synced across both Core Modal & Left Workbench composers)
@@ -149,10 +155,57 @@
   // Strict True-Completion Tracking (ONLY after full final assistant text output!)
   // ==========================================================================
   let hasSeededInitialCompletions = false;
-  const seenCompletedTurnKeys = new Set(); // `${cid}:${turnNumber}`
+  const seenCompletedTurnKeys = new Set(); // `${cid}:${turnNumber}` (bounded LRU <= 200)
   const unreadWhiteSphereKeys = new Set(); // Keys currently lighting the 3D White Sphere
   let completedTaskColumns = []; // Array of { key, cid, convTitle, turnNumber, turnTitle, snippet, ts }
   let activeCompletedColKey = '';
+
+  function addBoundedSetKey(setObj, key, maxEntries) {
+    if (!key) return;
+    if (setObj.has(key)) setObj.delete(key);
+    setObj.add(key);
+    while (setObj.size > maxEntries) {
+      const oldest = setObj.values().next().value;
+      if (oldest === undefined) break;
+      setObj.delete(oldest);
+    }
+  }
+
+  function addSeenCompletedTurnKey(key) {
+    addBoundedSetKey(seenCompletedTurnKeys, key, MAX_SEEN_COMPLETED_KEYS);
+  }
+
+  function setBoundedMapEntry(mapObj, key, val, maxEntries) {
+    if (!key) return;
+    if (Object.prototype.hasOwnProperty.call(mapObj, key)) {
+      delete mapObj[key];
+    }
+    mapObj[key] = val;
+    const keys = Object.keys(mapObj);
+    if (keys.length > maxEntries) {
+      const excess = keys.length - maxEntries;
+      for (let i = 0; i < excess; i++) {
+        delete mapObj[keys[i]];
+      }
+    }
+  }
+
+  function pruneMapByLiveIds(mapObj, liveIds, maxEntries) {
+    const keys = Object.keys(mapObj);
+    if (keys.length <= maxEntries) return;
+    for (let i = 0; i < keys.length && Object.keys(mapObj).length > maxEntries; i++) {
+      if (!liveIds.has(keys[i])) {
+        delete mapObj[keys[i]];
+      }
+    }
+    const rem = Object.keys(mapObj);
+    if (rem.length > maxEntries) {
+      const excess = rem.length - maxEntries;
+      for (let i = 0; i < excess; i++) {
+        delete mapObj[rem[i]];
+      }
+    }
+  }
 
   // Context menu target
   let ctxMenuCid = '';
@@ -560,6 +613,7 @@
   }
 
   function syncUnreadBadgesUI(runningCount, unreadCount) {
+    if (IS_WALLPAPER_VIEW) return;
     const colCount = completedTaskColumns.length;
     const dockBadge = document.getElementById('agy-left-dock-unread');
     if (dockBadge) {
@@ -601,9 +655,9 @@
         const c = nextConvs[i];
         liveIds.add(c.id);
         if (c.lastCompletedTurn && Number(c.lastCompletedTurn.turnNumber) > 0) {
-          for (let tn = 1; tn <= Number(c.lastCompletedTurn.turnNumber); tn++) {
-            seenCompletedTurnKeys.add(c.id + ':' + tn);
-          }
+          const maxTn = Number(c.lastCompletedTurn.turnNumber);
+          setBoundedMapEntry(maxCompletedTurnByCid, c.id, maxTn, MAX_TRACKED_CIDS);
+          addSeenCompletedTurnKey(c.id + ':' + maxTn);
         }
       }
       hasSeededInitialCompletions = true;
@@ -619,8 +673,15 @@
       if (lct && Number(lct.turnNumber) > 0 && String(lct.snippet || '').trim().length > 0) {
         const tNum = Number(lct.turnNumber);
         const key = c.id + ':' + tNum;
-        if (!seenCompletedTurnKeys.has(key)) {
-          seenCompletedTurnKeys.add(key);
+        const alreadySeen = seenCompletedTurnKeys.has(key) || tNum <= (maxCompletedTurnByCid[c.id] || 0);
+        if (alreadySeen) {
+          addSeenCompletedTurnKey(key);
+          if (tNum > (maxCompletedTurnByCid[c.id] || 0)) {
+            setBoundedMapEntry(maxCompletedTurnByCid, c.id, tNum, MAX_TRACKED_CIDS);
+          }
+        } else {
+          addSeenCompletedTurnKey(key);
+          setBoundedMapEntry(maxCompletedTurnByCid, c.id, tNum, MAX_TRACKED_CIDS);
           unreadWhiteSphereKeys.add(key);
           upsertCompletedColumnItem({
             key: key,
@@ -642,6 +703,8 @@
     completedTaskColumns = completedTaskColumns.filter(function (item) {
       return liveIds.has(item.cid);
     });
+    pruneMapByLiveIds(lastSeenTurnNumByCid, liveIds, MAX_TRACKED_CIDS);
+    pruneMapByLiveIds(maxCompletedTurnByCid, liveIds, MAX_TRACKED_CIDS);
     pushCompletionTo3DEngine();
   }
 
@@ -649,19 +712,22 @@
     if (!snap || !snap.cascadeId || snap.cascadeId === '__new__') return;
     const cid = snap.cascadeId;
     const turns = buildTurnsFromSnapshot(snap);
-    const seedOnly = Boolean(isInitialSnapshot) || !seenCompletedTurnKeys.has('__seeded_cid__:' + cid);
-    seenCompletedTurnKeys.add('__seeded_cid__:' + cid);
+    const seedKey = '__seeded_cid__:' + cid;
+    const seedOnly = Boolean(isInitialSnapshot) || (!seenCompletedTurnKeys.has(seedKey) && !Object.prototype.hasOwnProperty.call(maxCompletedTurnByCid, cid));
+    addSeenCompletedTurnKey(seedKey);
 
     let addedNew = false;
+    let highestCompleted = maxCompletedTurnByCid[cid] || 0;
     for (let i = 0; i < turns.length; i++) {
       const t = turns[i];
       const tNum = t.turnNumber || (i + 1);
       if (!isTurnTrulyCompleted(t)) continue;
       const key = cid + ':' + tNum;
       if (seedOnly) {
-        seenCompletedTurnKeys.add(key);
-      } else if (!seenCompletedTurnKeys.has(key)) {
-        seenCompletedTurnKeys.add(key);
+        if (tNum > highestCompleted) highestCompleted = tNum;
+      } else if (!seenCompletedTurnKeys.has(key) && tNum > highestCompleted) {
+        highestCompleted = tNum;
+        addSeenCompletedTurnKey(key);
         unreadWhiteSphereKeys.add(key);
         upsertCompletedColumnItem({
           key: key,
@@ -674,6 +740,10 @@
         });
         addedNew = true;
       }
+    }
+    if (highestCompleted > 0) {
+      setBoundedMapEntry(maxCompletedTurnByCid, cid, highestCompleted, MAX_TRACKED_CIDS);
+      addSeenCompletedTurnKey(cid + ':' + highestCompleted);
     }
     if (addedNew) {
       pushCompletionTo3DEngine();
@@ -705,7 +775,7 @@
     activeCompletedColKey = colItem.key;
     unreadWhiteSphereKeys.delete(colItem.key);
     const turnKey = colItem.cid + ':' + colItem.turnNumber;
-    expandedTurnKeys.add(turnKey);
+    addBoundedSetKey(expandedTurnKeys, turnKey, MAX_EXPANDED_TURN_KEYS);
     pendingScrollTurnKey = turnKey;
 
     if (openInWorkbench && workbenchOpen && workbenchRightPane !== 'chat') {
@@ -751,6 +821,7 @@
   }
 
   function renderCompletedColumnsBars() {
+    if (IS_WALLPAPER_VIEW) return;
     ['agy-core-completed-bar', 'agy-wb-completed-bar'].forEach(function (barId) {
       const bar = document.getElementById(barId);
       if (!bar) return;
@@ -1192,6 +1263,7 @@
       '.agy-chat-ta:focus { border-color: var(--line-strong); }',
       '.agy-send-primary { background: var(--accent-invert-bg); color: var(--accent-invert-fg); border: 1px solid var(--line-strong); font-family: var(--font-mono); font-size: 10.6px; font-weight: 600; padding: 0 18px; cursor: pointer; white-space: nowrap; }',
       '.agy-send-primary:disabled { opacity: 0.45; cursor: wait; }',
+      '.wb-opt-btn:disabled { opacity: 0.45; cursor: wait; pointer-events: none; }',
       '',
       '/* ======================================================================',
       '   AI USAGE EMBEDDED DASHBOARD (Shared by Workbench Telemetry & Ornamental Deck)',
@@ -1287,6 +1359,7 @@
   }
 
   function syncSendModeSwitchUI() {
+    if (IS_WALLPAPER_VIEW) return;
     const isInt = composerSendMode === 'interrupt';
     const isRunning = (currentStatus === 'running');
     document.querySelectorAll('[data-smode]').forEach(function (btn) {
@@ -1318,6 +1391,7 @@
   // DOM Construction
   // ==========================================================================
   function buildPanelDOM() {
+    if (IS_WALLPAPER_VIEW) return;
     if (document.getElementById('codex-agy-wing-shell') || document.getElementById('agy-workbench-drawer')) return;
     injectStyles();
 
@@ -1858,6 +1932,7 @@
   // AI USAGE FULL DASHBOARD ENGINE (Mounted in BOTH Workbench & Ornamental Deck!)
   // ==========================================================================
   function requestAiUsageData(forceFlag) {
+    if (IS_WALLPAPER_VIEW) return;
     const now = Date.now();
     if (aiUsageState.loading && !forceFlag) return;
     if (!forceFlag && aiUsageState.loadedOnce && (now - aiUsageState.lastFetchMs) < 3500) return;
@@ -1881,6 +1956,7 @@
   }
 
   function requestAiUsageSessionTurns(sessId) {
+    if (IS_WALLPAPER_VIEW) return;
     if (!sessId || aiUsageState.loadingTurnsIds.has(sessId)) return;
     aiUsageState.loadingTurnsIds.add(sessId);
     renderAllAiUsageMounts();
@@ -1900,6 +1976,7 @@
   }
 
   function handleAiUsagePayload(payload) {
+    if (IS_WALLPAPER_VIEW) return;
     aiUsageState.loading = false;
     if (!payload || !payload.ok || !payload.overview) {
       aiUsageState.error = (payload && payload.error) ? payload.error : '暂无 AI Usage 统计数据';
@@ -1917,6 +1994,7 @@
   }
 
   function handleAiUsageTurnsPayload(payload) {
+    if (IS_WALLPAPER_VIEW) return;
     const sid = payload && payload.id ? String(payload.id) : '';
     if (sid) aiUsageState.loadingTurnsIds.delete(sid);
     if (payload && payload.ok && sid) {
@@ -2077,8 +2155,8 @@
 
     let turnDetailHtml = '';
     if (nt) {
-      const acctEmail = nt.account || 'nope76832@gmail.com';
-      const tierLbl = nt.tier || 'Google AI Ultra';
+      const acctEmail = nt.account || '--';
+      const tierLbl = nt.tier || '--';
       const p5Str = Number(nt.p5 || 0).toFixed(2) + '%';
       const pwStr = Number(nt.pw || 0).toFixed(2) + '%';
       turnDetailHtml =
@@ -2254,8 +2332,8 @@
     const avgPerStep = steps > 0 ? fmtCnTokens(calc.tokTotal / steps) : { num: '0', unit: '' };
 
     // Quota groups & DeepSeek ledger
-    const acct = qObj.account || { email: 'nope76832@gmail.com', tier: 'Google AI Ultra' };
-    const tierShort = String(acct.tier || 'Ultra').replace(/^Google AI\s+/i, '');
+    const acct = qObj.account || { email: '', tier: '' };
+    const tierShort = String(acct.tier || '--').replace(/^Google AI\s+/i, '');
     const dshLed = qObj.dsh_ledger || {};
     const dshCny = calc.dsh.cost > 0 ? (calc.dsh.cost * USD_TO_CNY) : (Number(dshLed.total_spent_cny) || 0);
     const dshBal = dshLed.balance_cny != null ? (' · 余额 ¥' + Number(dshLed.balance_cny).toFixed(2)) : '';
@@ -2338,7 +2416,7 @@
       '</div>' +
       '<div class="aiu-sec-hdr" style="padding-top:2px;">' +
       '  <span>ANTIGRAVITY 额度 · DEEPSEEK 开销</span>' +
-      '  <span style="color:var(--ink-primary);">' + escapeHtml(acct.email || '') + ' · ' + escapeHtml(tierShort) + ' · 当前剩余</span>' +
+      '  <span style="color:var(--ink-primary);">' + escapeHtml(acct.email || '--') + ' · ' + escapeHtml(tierShort) + ' · 当前剩余</span>' +
       '</div>' +
       '<div class="aiu-box">' +
       '  <div class="aiu-sec-hdr"><span>' + escapeHtml(getPeriodDisplayName(p)) + ' 用掉额度与开销</span><span>累计消耗</span></div>' +
@@ -2401,6 +2479,7 @@
   }
 
   function renderAllAiUsageMounts() {
+    if (IS_WALLPAPER_VIEW) return;
     const html = monochromizeEmojis(buildAiUsageHtml());
     ['wb-ai-usage-mount', 'orn-ai-usage-mount'].forEach(function (id) {
       const el = document.getElementById(id);
@@ -2544,6 +2623,7 @@
   }
 
   function renderEmbeddedSettingsBody() {
+    if (IS_WALLPAPER_VIEW) return;
     const bodyEl = document.getElementById('agy-wb-settings-body');
     if (!bodyEl || !window.ophanimAgent || typeof window.ophanimAgent.getFullControlState !== 'function') return;
     const st = window.ophanimAgent.getFullControlState();
@@ -2709,22 +2789,34 @@
     }
 
     if (workbenchSettingsTab === 'wallpaper') {
-      const wp = st.wallpaper || { active: false, wallpaperMode: 'agy_live' };
+      const wp = st.wallpaper || { active: false, actionInFlight: false, wallpaperMode: 'agy_live', autoFollowWorking: true };
+      const wpBusy = Boolean(wp.actionInFlight);
+      const autoFollowOn = wp.autoFollowWorking !== false;
+      const trackLine = (wp.active && wp.wallpaperTitle)
+        ? ('<div id="wb-wp-track" style="font-family:var(--font-mono);font-size:9.6px;color:var(--ink-primary);padding:4px 7px;border:1px solid var(--line-dim);background:var(--line-faint);">壁纸当前圣轮：[' +
+            (wp.wallpaperStatus === 'running' ? '● 工作中' : '✓ 已完成') + '] ' + escapeHtml(wp.wallpaperTitle) + '</div>')
+        : '<div id="wb-wp-track" style="display:none;font-family:var(--font-mono);font-size:9.6px;color:var(--ink-primary);padding:4px 7px;border:1px solid var(--line-dim);background:var(--line-faint);"></div>';
       bodyEl.innerHTML = [
         '<div class="wb-set-card">',
         '  <div class="wb-set-card-hdr"><span>可交互动态桌面壁纸 · INTERACTIVE WINDOWS WALLPAPER</span><span id="wb-wp-status">' +
           (wp.active ? (wp.wallpaperMode === 'ambient_eco' ? '● 运行中 (常驻流光节能)' : '● 运行中 (Antigravity 实时随动)') : '○ 未启用') + '</span></div>',
         '  <div style="font-family:var(--font-mono);font-size:9.8px;color:var(--ink-muted);line-height:1.62;">',
         '    • 嵌入 Windows 桌面图标底层（保留顶部 OPHANIM 标题与以西结书圣言，桌面快捷方式完全正常点击）。<br/>',
+        '    • <strong>自动跳至工作中对话</strong>：默认开启，只要任意会话处于「工作中」，即使主面板停留在已完成会话，壁纸圣轮也会自动跳转至正在工作的会话实时运转。<br/>',
         '    • <strong>壁纸原生三维交互</strong>：左键在桌面空白处拖动可旋转星系；任务完工亮起白球/金字塔时<strong>直接左键点白球即可一键查阅归位</strong>；按住鼠标<strong>中键</strong>在任意一个环上可单独三维转动该环；壁纸下<strong>按住中键+滑动滚轮</strong>可自由伸缩镜头距离（普通窗口内直接滑滚轮即可缩放）；鼠标移上代码薄板会随鼠微倾；全部圣瞳实时跟鼠且屏蔽弹窗。',
         '  </div>',
+        trackLine,
         '  <div class="wb-set-grid-2">',
         '    <button type="button" class="wb-opt-btn' + (wp.wallpaperMode !== 'ambient_eco' ? ' active' : '') + '" data-wb-wpmode="agy_live">模式 1 · Antigravity 实时刷新随动<br/><span style="font-size:8.6px;opacity:0.75;">跟随所选：调用收发 / 工作随动 / 常驻流光</span></button>',
         '    <button type="button" class="wb-opt-btn' + (wp.wallpaperMode === 'ambient_eco' ? ' active' : '') + '" data-wb-wpmode="ambient_eco">模式 2 · 常驻流光 (低耗节能)<br/><span style="font-size:8.6px;opacity:0.75;">独立常驻圣光穿梭 + 交互时自动满帧</span></button>',
         '  </div>',
+        '  <div style="margin-top:4px;">',
+        '    <button type="button" id="wb-wp-follow-btn" class="wb-opt-btn' + (autoFollowOn ? ' active' : '') + '" style="width:100%;" data-wb-wpfollow="toggle">' +
+          (autoFollowOn ? '● 壁纸自动跳至工作中对话 (默认开启)' : '○ 壁纸锁定当前选中对话 (点击恢复自动跳转)') + '</button>',
+        '  </div>',
         '  <div class="wb-set-grid-2" style="margin-top:4px;">',
-        '    <button type="button" class="wb-opt-btn active" data-wb-wpact="enable">✦ 设为可交互桌面壁纸</button>',
-        '    <button type="button" class="wb-opt-btn" data-wb-wpact="disable">✕ 取消壁纸 (恢复原电脑壁纸)</button>',
+        '    <button type="button" class="wb-opt-btn active" data-wb-wpact="enable"' + (wpBusy ? ' disabled' : '') + '>' + (wpBusy ? '⏳ 处理中...' : '✦ 设为可交互桌面壁纸') + '</button>',
+        '    <button type="button" class="wb-opt-btn" data-wb-wpact="disable"' + (wpBusy ? ' disabled' : '') + '>' + (wpBusy ? '⏳ 处理中...' : '✕ 取消壁纸 (恢复原电脑壁纸)') + '</button>',
         '  </div>',
         '</div>'
       ].join('');
@@ -2732,6 +2824,7 @@
   }
 
   function syncEmbeddedSettingsLiveValues() {
+    if (IS_WALLPAPER_VIEW) return;
     if (!window.ophanimAgent || typeof window.ophanimAgent.getFullControlState !== 'function') return;
     const st = window.ophanimAgent.getFullControlState();
     const scripSize = typeof st.scriptureSizeMult === 'number' ? st.scriptureSizeMult : 1.0;
@@ -2775,6 +2868,36 @@
       wpEl.textContent = st.wallpaper.active
         ? (st.wallpaper.wallpaperMode === 'ambient_eco' ? '● 运行中 (常驻流光节能)' : '● 运行中 (Antigravity 实时随动)')
         : '○ 未启用';
+    }
+    const wpTrackEl = document.getElementById('wb-wp-track');
+    if (wpTrackEl && st.wallpaper) {
+      if (st.wallpaper.active && st.wallpaper.wallpaperTitle) {
+        wpTrackEl.style.display = 'block';
+        wpTrackEl.textContent = '壁纸当前圣轮：[' +
+          (st.wallpaper.wallpaperStatus === 'running' ? '● 工作中' : '✓ 已完成') + '] ' + st.wallpaper.wallpaperTitle;
+      } else {
+        wpTrackEl.style.display = 'none';
+      }
+    }
+    const wpFollowBtn = document.getElementById('wb-wp-follow-btn');
+    if (wpFollowBtn && st.wallpaper) {
+      const af = st.wallpaper.autoFollowWorking !== false;
+      wpFollowBtn.classList.toggle('active', af);
+      wpFollowBtn.textContent = af
+        ? '● 壁纸自动跳至工作中对话 (默认开启)'
+        : '○ 壁纸锁定当前选中对话 (点击恢复自动跳转)';
+    }
+    if (st.wallpaper) {
+      const wpBusy = Boolean(st.wallpaper.actionInFlight);
+      document.querySelectorAll('[data-wb-wpact]').forEach(function (b) {
+        b.disabled = wpBusy;
+        const act = b.getAttribute('data-wb-wpact');
+        if (act === 'enable') {
+          b.textContent = wpBusy ? '⏳ 处理中...' : '✦ 设为可交互桌面壁纸';
+        } else if (act === 'disable') {
+          b.textContent = wpBusy ? '⏳ 处理中...' : '✕ 取消壁纸 (恢复原电脑壁纸)';
+        }
+      });
     }
   }
 
@@ -3041,6 +3164,7 @@
   }
 
   function syncBeamModeUI(mode) {
+    if (IS_WALLPAPER_VIEW) return;
     document.querySelectorAll('.agy-beam-pill').forEach(function (b) {
       b.classList.toggle('active', b.getAttribute('data-agy-beam') === mode);
     });
@@ -3545,7 +3669,7 @@
       const turnKey = card ? card.getAttribute('data-turn-key') : '';
       if (card && turnKey) {
         const nowOpen = !card.classList.contains('expanded');
-        if (nowOpen) expandedTurnKeys.add(turnKey);
+        if (nowOpen) addBoundedSetKey(expandedTurnKeys, turnKey, MAX_EXPANDED_TURN_KEYS);
         else expandedTurnKeys.delete(turnKey);
         if (lastSnapshot) renderConversationStream(lastSnapshot, false);
       }
@@ -3684,11 +3808,25 @@
         renderEmbeddedSettingsBody();
         return;
       }
+      const wpFollowBtn = e.target.closest('[data-wb-wpfollow]');
+      if (wpFollowBtn && window.ophanimAgent && typeof window.ophanimAgent.setWallpaperAutoFollow === 'function') {
+        const curWp = typeof window.ophanimAgent.getWallpaperState === 'function'
+          ? (window.ophanimAgent.getWallpaperState() || {})
+          : {};
+        window.ophanimAgent.setWallpaperAutoFollow(curWp.autoFollowWorking === false);
+        setTimeout(renderEmbeddedSettingsBody, 120);
+        return;
+      }
       const wpActBtn = e.target.closest('[data-wb-wpact]');
       if (wpActBtn && window.ophanimAgent && typeof window.ophanimAgent.requestWallpaperAction === 'function') {
+        const curWp = typeof window.ophanimAgent.getWallpaperState === 'function'
+          ? (window.ophanimAgent.getWallpaperState() || {})
+          : {};
+        if (wpActBtn.disabled || curWp.actionInFlight) return;
         const wAct = wpActBtn.getAttribute('data-wb-wpact');
+        document.querySelectorAll('[data-wb-wpact]').forEach(function (b) { b.disabled = true; });
         window.ophanimAgent.requestWallpaperAction(wAct);
-        setTimeout(renderEmbeddedSettingsBody, 220);
+        syncEmbeddedSettingsLiveValues();
       }
     });
 
@@ -4002,6 +4140,7 @@
   }
 
   function renderSessionList() {
+    if (IS_WALLPAPER_VIEW) return;
     const rightListEl = document.getElementById('agy-session-list');
     const wbListEl = document.getElementById('agy-wb-session-list');
     const cntEl = document.getElementById('agy-conv-count-badge');
@@ -4072,6 +4211,7 @@
     if (!snap) return;
     lastSnapshot = snap;
     currentStatus = snap.status || 'idle';
+    if (IS_WALLPAPER_VIEW) return;
     syncSendModeSwitchUI();
     renderCompletedColumnsBars();
 
@@ -4131,8 +4271,8 @@
       const prevSeenTurnNum = lastSeenTurnNumByCid[cidKey] || 0;
       if (prevSeenTurnNum < latestTurnNum) {
         hadNewTurn = true;
-        lastSeenTurnNumByCid[cidKey] = latestTurnNum;
-        expandedTurnKeys.add(cidKey + ':' + latestTurnNum);
+        setBoundedMapEntry(lastSeenTurnNumByCid, cidKey, latestTurnNum, MAX_TRACKED_CIDS);
+        addBoundedSetKey(expandedTurnKeys, cidKey + ':' + latestTurnNum, MAX_EXPANDED_TURN_KEYS);
       }
 
       const queuedCount = turns.filter(function (x) { return x.status === 'queued'; }).length;
@@ -4420,7 +4560,7 @@
           if (turns.length > 0) {
             const latestT = turns[turns.length - 1];
             const tKey = currentCid + ':' + (latestT.turnNumber || turns.length);
-            localTurnAttachmentPaths[tKey] = payload.stagedPaths.slice();
+            setBoundedMapEntry(localTurnAttachmentPaths, tKey, payload.stagedPaths.slice(), MAX_LOCAL_ATT_PATH_KEYS);
             if (Array.isArray(latestT.attachments)) {
               for (let k = 0; k < Math.min(latestT.attachments.length, payload.stagedPaths.length); k++) {
                 latestT.attachments[k].path = payload.stagedPaths[k];
@@ -4470,7 +4610,8 @@
     if (ws && ws.readyState === 1) {
       ws.send(JSON.stringify({
         type: 'agy_init_sync',
-        preferredCascadeId: preferredCid
+        preferredCascadeId: preferredCid,
+        isWallpaper: IS_WALLPAPER_VIEW
       }));
       if (!IS_WALLPAPER_VIEW) {
         ws.send(JSON.stringify({
@@ -4534,7 +4675,7 @@
   }
 
   function applyPanelConfig(cfg) {
-    if (!cfg || typeof cfg !== 'object') return;
+    if (IS_WALLPAPER_VIEW || !cfg || typeof cfg !== 'object') return;
     if (typeof cfg.savedCodexWidth === 'number' && cfg.savedCodexWidth >= 300) savedCodexWidthPx = cfg.savedCodexWidth;
     if (typeof cfg.visible === 'boolean') setPanelVisible(cfg.visible);
     if (typeof cfg.codexBodyCollapsed === 'boolean') setCodexBodyCollapsed(cfg.codexBodyCollapsed, true);
@@ -4571,9 +4712,11 @@
     refreshAiUsage: function () { requestAiUsageData(true); }
   };
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', buildPanelDOM);
-  } else {
-    buildPanelDOM();
+  if (!IS_WALLPAPER_VIEW) {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', buildPanelDOM);
+    } else {
+      buildPanelDOM();
+    }
   }
 })();

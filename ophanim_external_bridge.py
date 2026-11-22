@@ -53,6 +53,8 @@ _PENDING_RELAY_CV = threading.Condition(_LOCK)
 _PENDING_RELAY_QUEUE: list[dict[str, Any]] = []
 _CANCEL_EVENTS: dict[str, threading.Event] = {}
 _ACTIVE_PROCS: dict[str, subprocess.Popen[bytes]] = {}
+_BACKEND_CFG_LOCK = threading.Lock()
+_BACKEND_CFG_CACHE: dict[str, Any] = {"exists": False, "mtime_ns": -1, "size": -1, "data": {}}
 
 
 def is_turn_cancelled(cid: str) -> bool:
@@ -107,13 +109,37 @@ def _guess_kind(filename: str) -> str:
 
 def load_backend_config() -> dict[str, Any]:
     cfg: dict[str, Any] = {}
-    if BACKEND_CONFIG_PATH.is_file():
-        try:
-            raw = json.loads(BACKEND_CONFIG_PATH.read_text(encoding="utf-8", errors="replace"))
-            if isinstance(raw, dict):
-                cfg = raw
-        except Exception as exc:
-            logger.warning("Failed reading ophanim_agent_backend.json: %s", exc)
+    exists = False
+    mtime_ns = -1
+    size = -1
+    try:
+        st = BACKEND_CONFIG_PATH.stat()
+        exists = True
+        mtime_ns = int(st.st_mtime_ns)
+        size = int(st.st_size)
+    except OSError:
+        exists = False
+
+    with _BACKEND_CFG_LOCK:
+        if (
+            _BACKEND_CFG_CACHE["exists"] == exists
+            and _BACKEND_CFG_CACHE["mtime_ns"] == mtime_ns
+            and _BACKEND_CFG_CACHE["size"] == size
+        ):
+            cfg = dict(_BACKEND_CFG_CACHE["data"])
+        else:
+            loaded: dict[str, Any] = {}
+            if exists:
+                try:
+                    raw = json.loads(BACKEND_CONFIG_PATH.read_text(encoding="utf-8", errors="replace"))
+                    if isinstance(raw, dict):
+                        loaded = raw
+                except Exception as exc:
+                    logger.warning("Failed reading ophanim_agent_backend.json: %s", exc)
+            _BACKEND_CFG_CACHE.update(
+                {"exists": exists, "mtime_ns": mtime_ns, "size": size, "data": loaded}
+            )
+            cfg = dict(loaded)
 
     env_provider = os.environ.get("OPHANIM_AGENT_PROVIDER", "").strip()
     env_mode = os.environ.get("OPHANIM_AGENT_MODE", "").strip()
@@ -122,6 +148,19 @@ def load_backend_config() -> dict[str, Any]:
     if env_mode:
         cfg.setdefault("mode", env_mode)
     return cfg
+
+
+def _has_external_session_files() -> bool:
+    if not EXT_SESSIONS_DIR.is_dir():
+        return False
+    try:
+        with os.scandir(EXT_SESSIONS_DIR) as it:
+            for entry in it:
+                if entry.name.endswith(".json") and not entry.name.startswith("."):
+                    return True
+    except OSError:
+        pass
+    return False
 
 
 def is_external_backend_preferred(agy_ls_alive: bool) -> bool:
@@ -149,7 +188,7 @@ def is_external_backend_preferred(agy_ls_alive: bool) -> bool:
         return True
     if os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY"):
         return True
-    if EXT_SESSIONS_DIR.is_dir() and any(EXT_SESSIONS_DIR.glob("*.json")):
+    if _has_external_session_files():
         return True
     return False
 
@@ -223,7 +262,14 @@ def _save_session(doc: dict[str, Any]) -> None:
     tmp = EXT_SESSIONS_DIR / f".{cid}.{os.getpid()}.{time.time_ns()}.tmp"
     try:
         tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, p)
+        for attempt in range(5):
+            try:
+                os.replace(tmp, p)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.02 * (attempt + 1))
     finally:
         if tmp.exists():
             try:

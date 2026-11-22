@@ -10,6 +10,7 @@ Zero mock data, zero unrelated background file noise.
 from __future__ import annotations
 
 import base64
+from collections import OrderedDict
 import copy
 from datetime import datetime, timezone
 import json
@@ -18,20 +19,33 @@ import mimetypes
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import subprocess
+import threading
 import time
 from typing import Any
 import urllib.error
 import urllib.request
+import uuid
 
 logger = logging.getLogger("ophanim_agy_bridge")
 
 PROJECT_DIR = Path(__file__).resolve().parent
 BRAIN_DIR = Path(os.environ.get("OPHANIM_BRAIN_DIR", str(Path.home() / ".gemini/antigravity/brain")))
+DESKTOP_CONV_DIR = Path(os.environ.get("OPHANIM_DESKTOP_CONV_DIR", str(Path.home() / ".gemini/antigravity/conversations")))
+DAEMON_HUB_DIR = Path(os.environ.get("OPHANIM_DAEMON_DIR", str(Path.home() / ".gemini/antigravity/daemon")))
+CLI_BRAIN_DIR = Path(os.environ.get("OPHANIM_CLI_BRAIN_DIR", str(Path.home() / ".gemini/antigravity-cli/brain")))
+CLI_CONV_DIR = Path(os.environ.get("OPHANIM_CLI_CONV_DIR", str(Path.home() / ".gemini/antigravity-cli/conversations")))
+DESKTOP_ANN_DIR = Path.home() / ".gemini/antigravity/annotations"
+CLI_ANN_DIR = Path.home() / ".gemini/antigravity-cli/annotations"
 HERMES_BRIDGE_DIR = Path(os.environ.get("OPHANIM_HERMES_DIR", str(PROJECT_DIR.parent / "hermes-agy-bridge")))
 AGY_ENV_FILE = HERMES_BRIDGE_DIR / "agy_env.json"
 CASCADE_TEMPLATE_FILE = HERMES_BRIDGE_DIR / "cascade_config_template.json"
+_LS_RPC_FAIL_UNTIL: float = 0.0
+_OPHANIM_CLI_PROCS: dict[str, subprocess.Popen] = {}
+_OPHANIM_CLI_ALIAS: dict[str, str] = {}
+_OPHANIM_CLI_LOCK = threading.Lock()
 _SCRATCH_ROOT_CAND = PROJECT_DIR.parent.parent / "scratch"
 UPLOAD_STAGE_DIR = Path(
     os.environ.get(
@@ -46,6 +60,14 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
 MODEL_CATALOG_PB: dict[str, dict[str, str]] = {
     "inherit": {"label": "跟随会话当前模型 (默认)", "pb": ""},
+    "gemini-4-neon-xhigh": {"label": "Gemini 4 Neon (XHigh)", "pb": "MODEL_PLACEHOLDER_M535"},
+    "gemini-4-neon-high": {"label": "Gemini 4 Neon (High)", "pb": "MODEL_PLACEHOLDER_M532"},
+    "gemini-4-neon-medium": {"label": "Gemini 4 Neon (Medium)", "pb": "MODEL_PLACEHOLDER_M533"},
+    "gemini-4-neon-low": {"label": "Gemini 4 Neon (Low)", "pb": "MODEL_PLACEHOLDER_M534"},
+    "gemini-4-hydrogen-xhigh": {"label": "Gemini 4 Hydrogen (XHigh)", "pb": "MODEL_PLACEHOLDER_M528"},
+    "gemini-4-hydrogen-high": {"label": "Gemini 4 Hydrogen (High)", "pb": "MODEL_PLACEHOLDER_M525"},
+    "gemini-4-hydrogen-medium": {"label": "Gemini 4 Hydrogen (Medium)", "pb": "MODEL_PLACEHOLDER_M526"},
+    "gemini-4-hydrogen-low": {"label": "Gemini 4 Hydrogen (Low)", "pb": "MODEL_PLACEHOLDER_M527"},
     "gemini-4-carbon-high": {"label": "Gemini 4 Carbon (High)", "pb": "MODEL_PLACEHOLDER_M427"},
     "gemini-4-carbon-medium": {"label": "Gemini 4 Carbon (Medium)", "pb": "MODEL_PLACEHOLDER_M437"},
     "gemini-4-carbon-low": {"label": "Gemini 4 Carbon (Low)", "pb": "MODEL_PLACEHOLDER_M438"},
@@ -123,7 +145,8 @@ TEXT_PREVIEW_EXTS = {
     ".yaml", ".yml", ".toml", ".ini", ".cfg", ".sh", ".bat", ".cmd", ".ps1", ".sql", ".csv", ".xml",
 }
 
-_LS_CACHE: dict[str, Any] = {"addr": "", "token": "", "ts": 0.0}
+_LS_CACHE_LOCK = threading.Lock()
+_LS_CACHE: dict[str, Any] = {"addr": "", "token": "", "ts": 0.0, "port_ts": 0.0, "neg_until": 0.0}
 _CASCADE_CFG_CACHE: dict[str, Any] = {"cfg": None, "ts": 0.0}
 
 
@@ -165,105 +188,170 @@ def _is_port_alive(addr: str) -> bool:
         return False
 
 
+def _probe_hub_json_ls() -> tuple[str, str]:
+    """Fast pure-Python check of ~/.gemini/antigravity/daemon/hub_*.json before spawning PowerShell."""
+    if not DAEMON_HUB_DIR.is_dir():
+        return "", ""
+    try:
+        entries: list[tuple[float, str]] = []
+        with os.scandir(DAEMON_HUB_DIR) as it:
+            for e in it:
+                if e.name.startswith("hub_") and e.name.endswith(".json") and e.is_file(follow_symlinks=False):
+                    try:
+                        entries.append((e.stat(follow_symlinks=False).st_mtime, e.path))
+                    except OSError:
+                        pass
+        entries.sort(reverse=True)
+        for _, fpath in entries[:4]:
+            try:
+                raw = json.loads(Path(fpath).read_text(encoding="utf-8", errors="replace"))
+                if not isinstance(raw, dict):
+                    continue
+                port = int(raw.get("httpPort") or raw.get("port") or raw.get("connectPort") or 0)
+                tok = str(raw.get("csrfToken") or raw.get("csrf_token") or "").strip()
+                if port > 0:
+                    cand_addr = f"localhost:{port}"
+                    if _is_port_alive(cand_addr):
+                        return cand_addr, tok
+            except Exception:
+                continue
+    except OSError:
+        pass
+    return "", ""
+
+
 def discover_agy_ls(force: bool = False) -> tuple[str, str]:
     now = time.monotonic()
-    if (
-        not force
-        and _LS_CACHE["addr"]
-        and (now - float(_LS_CACHE["ts"])) < 10.0
-        and _is_port_alive(str(_LS_CACHE["addr"]))
-    ):
-        return str(_LS_CACHE["addr"]), str(_LS_CACHE["token"])
+    with _LS_CACHE_LOCK:
+        cached_addr = str(_LS_CACHE["addr"] or "")
+        cached_tok = str(_LS_CACHE["token"] or "")
+        cached_ts = float(_LS_CACHE["ts"])
+        cached_port_ts = float(_LS_CACHE["port_ts"])
+        neg_until = float(_LS_CACHE["neg_until"])
 
-    addr = ""
-    token = ""
-    saved_env: dict[str, Any] = {}
-    if AGY_ENV_FILE.is_file():
-        try:
-            saved_env = json.loads(AGY_ENV_FILE.read_text(encoding="utf-8", errors="replace"))
-            if isinstance(saved_env, dict):
-                addr = (
-                    str(saved_env.get("ANTIGRAVITY_LS_ADDRESS") or "")
-                    .strip()
-                    .replace("http://", "")
-                    .replace("https://", "")
-                    .rstrip("/")
-                )
-                token = str(saved_env.get("ANTIGRAVITY_CSRF_TOKEN") or "").strip()
-        except Exception:
-            saved_env = {}
+    if not force:
+        if cached_addr and (now - cached_ts) < 10.0:
+            if (now - cached_port_ts) < 5.0:
+                return cached_addr, cached_tok
+            if _is_port_alive(cached_addr):
+                with _LS_CACHE_LOCK:
+                    _LS_CACHE["port_ts"] = now
+                return cached_addr, cached_tok
+        elif not cached_addr and now < neg_until:
+            # 30s negative cache prevents PowerShell Get-CimInstance storms when IDE LS isn't running
+            return "", ""
 
-    if not force and addr and _is_port_alive(addr):
-        _LS_CACHE.update({"addr": addr, "token": token, "ts": now})
-        return addr, token
+    with _LS_CACHE_LOCK:
+        now = time.monotonic()
+        if not force and not _LS_CACHE["addr"] and now < float(_LS_CACHE["neg_until"]):
+            return "", ""
 
-    try:
-        ps_cmd = (
-            "$proc = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'language_server' } | Select-Object -First 1; "
-            "if ($proc) { "
-            "  $ports = @(Get-NetTCPConnection -OwningProcess $proc.ProcessId -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort); "
-            "  Write-Output ('PID=' + $proc.ProcessId + '|PORTS=' + ($ports -join ',') + '|CMD=' + $proc.CommandLine) "
-            "}"
-        )
-        out = subprocess.check_output(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
-            timeout=4.5,
-            text=True,
-            errors="ignore",
-            creationflags=_NO_WINDOW,
-        ).strip()
-        if "PID=" in out:
-            m_tok = re.search(r"--csrf_token[=\s]+([0-9a-fA-F\-]{16,})", out)
-            m_ports = re.search(r"\|PORTS=([0-9,]+)\|", out)
-            cand_tok = m_tok.group(1).strip() if m_tok else token
-            cand_ports = [int(p) for p in (m_ports.group(1).split(",") if m_ports else []) if p.isdigit()]
-            chosen_port = 0
-            for cp in sorted(cand_ports):
-                try:
-                    req = urllib.request.Request(
-                        f"http://127.0.0.1:{cp}/exa.language_server_pb.LanguageServerService/GetUserStatus",
-                        data=b"{}",
-                        headers={
-                            "Content-Type": "application/json",
-                            "Connect-Protocol-Version": "1",
-                            "x-codeium-csrf-token": cand_tok,
-                            "X-Csrf-Token": cand_tok,
-                        },
-                        method="POST",
+        addr = ""
+        token = ""
+        saved_env: dict[str, Any] = {}
+        if AGY_ENV_FILE.is_file():
+            try:
+                saved_env = json.loads(AGY_ENV_FILE.read_text(encoding="utf-8", errors="replace"))
+                if isinstance(saved_env, dict):
+                    addr = (
+                        str(saved_env.get("ANTIGRAVITY_LS_ADDRESS") or "")
+                        .strip()
+                        .replace("http://", "")
+                        .replace("https://", "")
+                        .rstrip("/")
                     )
-                    with _DIRECT_OPENER.open(req, timeout=1.2) as r:
-                        if r.status == 200:
-                            chosen_port = cp
-                            break
-                except Exception:
-                    continue
-            if not chosen_port and cand_ports:
-                chosen_port = sorted(cand_ports)[0]
-            if chosen_port:
-                addr = f"localhost:{chosen_port}"
-                token = cand_tok
-                if isinstance(saved_env, dict) and AGY_ENV_FILE.parent.is_dir():
-                    try:
-                        saved_env["ANTIGRAVITY_LS_ADDRESS"] = addr
-                        if token:
-                            saved_env["ANTIGRAVITY_CSRF_TOKEN"] = token
-                        AGY_ENV_FILE.write_text(
-                            json.dumps(saved_env, ensure_ascii=False, indent=2) + "\n",
-                            encoding="utf-8",
-                        )
-                    except Exception:
-                        pass
-    except Exception as exc:
-        logger.debug("LS discovery error: %s", exc)
+                    token = str(saved_env.get("ANTIGRAVITY_CSRF_TOKEN") or "").strip()
+            except Exception:
+                saved_env = {}
 
-    _LS_CACHE.update({"addr": addr, "token": token, "ts": now})
-    return addr, token
+        if not force and addr and _is_port_alive(addr):
+            _LS_CACHE.update({"addr": addr, "token": token, "ts": now, "port_ts": now, "neg_until": 0.0})
+            return addr, token
+
+        hub_addr, hub_tok = _probe_hub_json_ls()
+        if hub_addr:
+            _LS_CACHE.update(
+                {"addr": hub_addr, "token": hub_tok or token, "ts": now, "port_ts": now, "neg_until": 0.0}
+            )
+            return hub_addr, hub_tok or token
+
+        found_addr = ""
+        found_tok = token
+        try:
+            ps_cmd = (
+                "$proc = Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'language_server' } | Select-Object -First 1; "
+                "if ($proc) { "
+                "  $ports = @(Get-NetTCPConnection -OwningProcess $proc.ProcessId -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort); "
+                "  Write-Output ('PID=' + $proc.ProcessId + '|PORTS=' + ($ports -join ',') + '|CMD=' + $proc.CommandLine) "
+                "}"
+            )
+            out = subprocess.check_output(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                timeout=4.5,
+                text=True,
+                errors="ignore",
+                creationflags=_NO_WINDOW,
+            ).strip()
+            if "PID=" in out:
+                m_tok = re.search(r"--csrf_token[=\s]+([0-9a-fA-F\-]{16,})", out)
+                m_ports = re.search(r"\|PORTS=([0-9,]+)\|", out)
+                cand_tok = m_tok.group(1).strip() if m_tok else token
+                cand_ports = [int(p) for p in (m_ports.group(1).split(",") if m_ports else []) if p.isdigit()]
+                chosen_port = 0
+                for cp in sorted(cand_ports):
+                    try:
+                        req = urllib.request.Request(
+                            f"http://127.0.0.1:{cp}/exa.language_server_pb.LanguageServerService/GetUserStatus",
+                            data=b"{}",
+                            headers={
+                                "Content-Type": "application/json",
+                                "Connect-Protocol-Version": "1",
+                                "x-codeium-csrf-token": cand_tok,
+                                "X-Csrf-Token": cand_tok,
+                            },
+                            method="POST",
+                        )
+                        with _DIRECT_OPENER.open(req, timeout=1.2) as r:
+                            if r.status == 200:
+                                chosen_port = cp
+                                break
+                    except Exception:
+                        continue
+                if not chosen_port and cand_ports:
+                    chosen_port = sorted(cand_ports)[0]
+                if chosen_port:
+                    found_addr = f"localhost:{chosen_port}"
+                    found_tok = cand_tok
+                    if isinstance(saved_env, dict) and AGY_ENV_FILE.parent.is_dir():
+                        try:
+                            saved_env["ANTIGRAVITY_LS_ADDRESS"] = found_addr
+                            if found_tok:
+                                saved_env["ANTIGRAVITY_CSRF_TOKEN"] = found_tok
+                            AGY_ENV_FILE.write_text(
+                                json.dumps(saved_env, ensure_ascii=False, indent=2) + "\n",
+                                encoding="utf-8",
+                            )
+                        except Exception:
+                            pass
+        except Exception as exc:
+            logger.debug("LS discovery error: %s", exc)
+
+        if found_addr:
+            _LS_CACHE.update({"addr": found_addr, "token": found_tok, "ts": now, "port_ts": now, "neg_until": 0.0})
+            return found_addr, found_tok
+
+        _LS_CACHE.update({"addr": "", "token": "", "ts": now, "port_ts": now, "neg_until": now + 30.0})
+        return "", ""
 
 
 def agy_rpc(method: str, payload: dict[str, Any], timeout: float = 8.0) -> dict[str, Any]:
+    global _LS_RPC_FAIL_UNTIL
+    if time.time() < _LS_RPC_FAIL_UNTIL:
+        raise RuntimeError("桌面端 Antigravity LS 处于 44.9.1+ 401 冷却期（已自动切换至官方 agy CLI 通道）")
     for attempt in range(2):
         addr, tok = discover_agy_ls(force=(attempt > 0))
         if not addr:
+            _LS_RPC_FAIL_UNTIL = time.time() + 120.0
             raise RuntimeError("未检测到运行中的本地 Antigravity Language Server")
         host_part = addr.replace("localhost:", "127.0.0.1:")
         url = f"http://{host_part}/exa.language_server_pb.LanguageServerService/{method}"
@@ -281,11 +369,19 @@ def agy_rpc(method: str, payload: dict[str, Any], timeout: float = 8.0) -> dict[
             method="POST",
         )
         try:
-            with _DIRECT_OPENER.open(req, timeout=timeout) as resp:
+            with _DIRECT_OPENER.open(req, timeout=min(timeout, 2.5 if attempt == 0 else timeout)) as resp:
                 raw = resp.read().decode("utf-8", errors="replace")
                 return json.loads(raw) if raw.strip() else {}
         except urllib.error.HTTPError as he:
-            if attempt == 0 and he.code in (401, 403, 502, 503):
+            if he.code in (401, 403):
+                _LS_RPC_FAIL_UNTIL = time.time() + 120.0
+                body = ""
+                try:
+                    body = he.read().decode("utf-8", errors="replace")[:240]
+                except Exception:
+                    pass
+                raise RuntimeError(f"Antigravity RPC {method} HTTP {he.code}: {body}") from he
+            if attempt == 0 and he.code in (502, 503):
                 continue
             body = ""
             try:
@@ -296,8 +392,92 @@ def agy_rpc(method: str, payload: dict[str, Any], timeout: float = 8.0) -> dict[
         except Exception as exc:
             if attempt == 0:
                 continue
+            _LS_RPC_FAIL_UNTIL = time.time() + 60.0
             raise RuntimeError(f"Antigravity RPC {method} 调用失败: {exc}") from exc
     return {}
+
+
+def _resolve_brain_dir(cid: str) -> Path:
+    clean = str(cid or "").strip()
+    if clean:
+        cli_d = CLI_BRAIN_DIR / clean
+        if (cli_d / ".system_generated/logs/transcript.jsonl").is_file() or cli_d.is_dir():
+            return cli_d
+    return BRAIN_DIR / clean
+
+
+def _read_pbtxt_title(cid: str) -> str:
+    clean = str(cid or "").strip()
+    if not clean:
+        return ""
+    for ann_dir in (CLI_ANN_DIR, DESKTOP_ANN_DIR):
+        p = ann_dir / f"{clean}.pbtxt"
+        if p.is_file():
+            try:
+                raw = p.read_text(encoding="utf-8", errors="replace")
+                m = re.search(r'title:\s*"((?:[^"\\]|\\.)*)"', raw)
+                if m:
+                    t = m.group(1).replace('\\"', '"').replace("\\\\", "\\").replace("\\n", " ").strip()
+                    if t:
+                        return t[:54]
+            except Exception:
+                pass
+    return ""
+
+
+def _is_cli_proc_running(cid: str) -> bool:
+    with _OPHANIM_CLI_LOCK:
+        p = _OPHANIM_CLI_PROCS.get(str(cid or "").strip())
+    return bool(p is not None and p.poll() is None)
+
+
+def _find_agy_cli_bin() -> str:
+    env_bin = os.environ.get("OPHANIM_AGY_BIN", "").strip()
+    if env_bin and Path(env_bin).is_file():
+        return str(Path(env_bin))
+    which_bin = shutil.which("agy") or shutil.which("agy.exe")
+    if which_bin:
+        return str(which_bin)
+    candidates: list[Path] = [
+        PROJECT_DIR.parent.parent / "bin" / "agy.exe",
+        PROJECT_DIR / "bin" / "agy.exe",
+        Path.home() / ".antigravity" / "bin" / "agy.exe",
+    ]
+    local_app = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_app:
+        candidates.append(Path(local_app) / "agy" / "bin" / "agy.exe")
+    for cand in candidates:
+        if cand.is_file():
+            return str(cand)
+    return ""
+
+
+def _resolve_agy_cli_cwd() -> str:
+    env_cwd = os.environ.get("OPHANIM_AGY_CWD", "").strip()
+    if env_cwd and Path(env_cwd).is_dir():
+        return str(Path(env_cwd))
+    workspace_root = PROJECT_DIR.parent.parent
+    if (workspace_root / "projects").is_dir():
+        return str(workspace_root)
+    if PROJECT_DIR.is_dir():
+        return str(PROJECT_DIR)
+    return str(Path.home())
+
+
+def _build_cli_env_oph() -> dict[str, str]:
+    env = dict(os.environ)
+    for port in (7890, 10809, 10808):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.15):
+                px = f"http://127.0.0.1:{port}"
+                env["HTTP_PROXY"] = px
+                env["HTTPS_PROXY"] = px
+                env["ALL_PROXY"] = px
+                break
+        except OSError:
+            continue
+    env["NO_PROXY"] = "127.0.0.1,localhost,::1"
+    return env
 
 
 def _parse_iso_epoch(iso_str: str, fallback: float = 0.0) -> float:
@@ -450,7 +630,10 @@ def _clean_assistant_text(raw: str) -> str:
 
 
 def _extract_first_user_title(cid: str) -> str:
-    t_path = BRAIN_DIR / cid / ".system_generated/logs/transcript.jsonl"
+    pb_t = _read_pbtxt_title(cid)
+    if pb_t:
+        return pb_t
+    t_path = _resolve_brain_dir(cid) / ".system_generated/logs/transcript.jsonl"
     if not t_path.is_file():
         return ""
     try:
@@ -473,7 +656,7 @@ def _extract_first_user_title(cid: str) -> str:
 
 
 def _read_swarm_child_ids(cid: str) -> list[tuple[str, dict[str, Any]]]:
-    mem_path = BRAIN_DIR / cid / ".system_generated/swarm/members.json"
+    mem_path = _resolve_brain_dir(cid) / ".system_generated/swarm/members.json"
     if not mem_path.is_file():
         return []
     try:
@@ -500,42 +683,111 @@ def _fetch_all_summaries_safe() -> dict[str, dict[str, Any]]:
     return {}
 
 
+_SESSION_META_LOCK = threading.Lock()
+_SESSION_META_CACHE: dict[str, Any] = {
+    "exists": False,
+    "mtime_ns": -1,
+    "size": -1,
+    "data": {"pinned": set(), "archived": set(), "deleted": set()},
+}
+
+
 def load_session_meta() -> dict[str, set[str]]:
-    """Load persisted pinned / archived / deleted conversation ID sets."""
-    out: dict[str, set[str]] = {"pinned": set(), "archived": set(), "deleted": set()}
-    if not SESSION_META_FILE.is_file():
-        return out
+    """Load persisted pinned / archived / deleted conversation ID sets (mtime-cached)."""
+    exists = False
+    mtime_ns = -1
+    size = -1
     try:
-        raw = json.loads(SESSION_META_FILE.read_text(encoding="utf-8", errors="replace"))
-        if isinstance(raw, dict):
-            for k in ("pinned", "archived", "deleted"):
-                vals = raw.get(k)
-                if isinstance(vals, list):
-                    out[k] = {str(v).strip() for v in vals if str(v).strip()}
-    except Exception as exc:
-        logger.debug("load_session_meta error: %s", exc)
-    return out
+        st = SESSION_META_FILE.stat()
+        exists = True
+        mtime_ns = int(st.st_mtime_ns)
+        size = int(st.st_size)
+    except OSError:
+        exists = False
+
+    with _SESSION_META_LOCK:
+        if (
+            _SESSION_META_CACHE["exists"] == exists
+            and _SESSION_META_CACHE["mtime_ns"] == mtime_ns
+            and _SESSION_META_CACHE["size"] == size
+        ):
+            cached = _SESSION_META_CACHE["data"]
+            return {
+                "pinned": set(cached["pinned"]),
+                "archived": set(cached["archived"]),
+                "deleted": set(cached["deleted"]),
+            }
+
+        out: dict[str, set[str]] = {"pinned": set(), "archived": set(), "deleted": set()}
+        if exists:
+            try:
+                raw = json.loads(SESSION_META_FILE.read_text(encoding="utf-8", errors="replace"))
+                if isinstance(raw, dict):
+                    for k in ("pinned", "archived", "deleted"):
+                        vals = raw.get(k)
+                        if isinstance(vals, list):
+                            out[k] = {str(v).strip() for v in vals if str(v).strip()}
+            except Exception as exc:
+                logger.debug("load_session_meta error: %s", exc)
+        _SESSION_META_CACHE.update(
+            {
+                "exists": exists,
+                "mtime_ns": mtime_ns,
+                "size": size,
+                "data": {
+                    "pinned": set(out["pinned"]),
+                    "archived": set(out["archived"]),
+                    "deleted": set(out["deleted"]),
+                },
+            }
+        )
+        return out
 
 
 def save_session_meta(meta: dict[str, set[str]]) -> None:
     """Atomically persist pinned / archived / deleted conversation ID sets."""
     SESSION_META_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = SESSION_META_FILE.parent / f".ophanim_session_meta.{os.getpid()}.{time.time_ns()}.tmp"
     payload = {
         "pinned": sorted(meta.get("pinned", set())),
         "archived": sorted(meta.get("archived", set())),
         "deleted": sorted(meta.get("deleted", set())),
         "updatedAt": int(time.time()),
     }
-    try:
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, SESSION_META_FILE)
-    finally:
-        if tmp.exists():
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    with _SESSION_META_LOCK:
+        tmp = SESSION_META_FILE.parent / f".ophanim_session_meta.{os.getpid()}.{time.time_ns()}.tmp"
+        try:
+            tmp.write_text(serialized, encoding="utf-8")
+            for attempt in range(5):
+                try:
+                    os.replace(tmp, SESSION_META_FILE)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.02 * (attempt + 1))
             try:
-                tmp.unlink()
+                st = SESSION_META_FILE.stat()
+                _SESSION_META_CACHE.update(
+                    {
+                        "exists": True,
+                        "mtime_ns": int(st.st_mtime_ns),
+                        "size": int(st.st_size),
+                        "data": {
+                            "pinned": set(meta.get("pinned", set())),
+                            "archived": set(meta.get("archived", set())),
+                            "deleted": set(meta.get("deleted", set())),
+                        },
+                    }
+                )
             except OSError:
-                pass
+                _SESSION_META_CACHE["mtime_ns"] = -1
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
 
 
 def mutate_conversation_meta(cascade_id: str, action: str) -> dict[str, Any]:
@@ -592,23 +844,37 @@ def mutate_conversation_meta(cascade_id: str, action: str) -> dict[str, Any]:
     }
 
 
-_LAST_DONE_META_CACHE: dict[str, tuple[float, int, str, dict[str, Any] | None]] = {}
+_CONV_CACHE_LOCK = threading.Lock()
+_LAST_DONE_META_CACHE: OrderedDict[str, tuple[int, int, str, dict[str, Any] | None]] = OrderedDict()
+_LAST_DONE_META_MAX = 500
+_CONV_META_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_CONV_META_MAX = 2500
+_FLAT_CONV_MTIMES: dict[str, int] = {}
+_DORMANT_SWEEP_CURSOR: int = 0
 
 
-def _peek_last_completed_turn_meta(t_path: Path, conv_status: str) -> dict[str, Any] | None:
-    """Fast mtime-cached check for the latest genuinely completed turn (non-empty final assistant text)."""
-    if not t_path.is_file():
-        return None
+def _peek_last_completed_turn_meta(
+    t_path: Path,
+    conv_status: str,
+    *,
+    mtime_ns: int | None = None,
+    size: int | None = None,
+) -> dict[str, Any] | None:
+    """Fast LRU-bounded mtime_ns-cached check for the latest genuinely completed turn."""
     key = str(t_path)
-    try:
-        st = t_path.stat()
-        mtime = float(st.st_mtime)
-        sz = int(st.st_size)
-    except OSError:
-        return None
-    cached = _LAST_DONE_META_CACHE.get(key)
-    if cached and cached[0] == mtime and cached[1] == sz and cached[2] == conv_status:
-        return cached[3]
+    if mtime_ns is None or size is None:
+        try:
+            st = t_path.stat()
+            mtime_ns = int(st.st_mtime_ns)
+            size = int(st.st_size)
+        except OSError:
+            return None
+
+    with _CONV_CACHE_LOCK:
+        cached = _LAST_DONE_META_CACHE.get(key)
+        if cached and cached[0] == mtime_ns and cached[1] == size and cached[2] == conv_status:
+            _LAST_DONE_META_CACHE.move_to_end(key)
+            return cached[3]
 
     meta_out: dict[str, Any] | None = None
     try:
@@ -626,11 +892,182 @@ def _peek_last_completed_turn_meta(t_path: Path, conv_status: str) -> dict[str, 
                 break
     except Exception:
         meta_out = None
-    _LAST_DONE_META_CACHE[key] = (mtime, sz, conv_status, meta_out)
+
+    with _CONV_CACHE_LOCK:
+        _LAST_DONE_META_CACHE[key] = (mtime_ns, size, conv_status, meta_out)
+        _LAST_DONE_META_CACHE.move_to_end(key)
+        while len(_LAST_DONE_META_CACHE) > _LAST_DONE_META_MAX:
+            _LAST_DONE_META_CACHE.popitem(last=False)
     return meta_out
 
 
+def _scan_flat_conv_dirty_cids() -> set[str]:
+    """Zero-extra-syscall `os.scandir` over flat `.db`/`.pb` conversation dirs to catch revived old chats."""
+    dirty: set[str] = set()
+    for flat_dir, suffix in ((CLI_CONV_DIR, ".db"), (DESKTOP_CONV_DIR, ".pb")):
+        if not flat_dir.is_dir():
+            continue
+        try:
+            with os.scandir(flat_dir) as it:
+                for entry in it:
+                    nm = entry.name
+                    if not nm.endswith(suffix):
+                        continue
+                    cid = nm[:-len(suffix)]
+                    if len(cid) < 32:
+                        continue
+                    try:
+                        m_ns = int(entry.stat(follow_symlinks=False).st_mtime_ns)
+                    except OSError:
+                        continue
+                    prev_m = _FLAT_CONV_MTIMES.get(cid)
+                    if prev_m != m_ns:
+                        _FLAT_CONV_MTIMES[cid] = m_ns
+                        if prev_m is not None:
+                            dirty.add(cid)
+        except OSError:
+            pass
+    return dirty
+
+
+def _stat_cid_entry(cid: str, brain_dir_str: str, rec: dict[str, Any] | None) -> dict[str, Any]:
+    """Stat transcript.jsonl & members.json for `cid`, refreshing cached child_ids only when members.json changes."""
+    t_path_str = os.path.join(brain_dir_str, ".system_generated", "logs", "transcript.jsonl")
+    m_path_str = os.path.join(brain_dir_str, ".system_generated", "swarm", "members.json")
+
+    if rec is None:
+        rec = {
+            "brain_dir": brain_dir_str,
+            "t_path": t_path_str,
+            "t_exists": False,
+            "t_mtime_ns": 0,
+            "t_mtime": 0.0,
+            "t_size": 0,
+            "hydrated_mtime_ns": -1,
+            "hydrated_size": -1,
+            "title": "",
+            "pbtxt_mtime_ns": -1,
+            "step_count": 0,
+            "members_mtime_ns": -1,
+            "child_ids": [],
+        }
+    elif rec.get("brain_dir") != brain_dir_str:
+        rec["brain_dir"] = brain_dir_str
+        rec["t_path"] = t_path_str
+        rec["hydrated_mtime_ns"] = -1
+        rec["hydrated_size"] = -1
+        rec["members_mtime_ns"] = -1
+
+    try:
+        st = os.stat(t_path_str)
+        rec["t_exists"] = True
+        rec["t_mtime_ns"] = int(st.st_mtime_ns)
+        rec["t_mtime"] = float(st.st_mtime)
+        rec["t_size"] = int(st.st_size)
+    except OSError:
+        rec["t_exists"] = False
+        rec["t_mtime_ns"] = 0
+        rec["t_mtime"] = 0.0
+        rec["t_size"] = 0
+
+    try:
+        mst = os.stat(m_path_str)
+        m_ns = int(mst.st_mtime_ns)
+        if m_ns != int(rec.get("members_mtime_ns", -1)):
+            cids_list: list[str] = []
+            try:
+                data = json.loads(Path(m_path_str).read_text(encoding="utf-8", errors="replace"))
+                members = data.get("members") or {}
+                for _, info in members.items():
+                    if not isinstance(info, dict) or info.get("role") == "coordinator":
+                        continue
+                    w_cid = str(info.get("conversation_id") or "").strip()
+                    if w_cid and w_cid != cid:
+                        cids_list.append(w_cid)
+            except Exception:
+                pass
+            rec["members_mtime_ns"] = m_ns
+            rec["child_ids"] = cids_list
+    except OSError:
+        rec["members_mtime_ns"] = -1
+        if rec.get("child_ids"):
+            rec["child_ids"] = []
+
+    return rec
+
+
+def _hydrate_cid_title_and_steps(cid: str, rec: dict[str, Any], need_title: bool, need_steps: bool) -> None:
+    """Read title / pbtxt / line count ONLY when transcript `(mtime_ns, size)` or pbtxt changed."""
+    t_exists = bool(rec.get("t_exists"))
+    t_mtime_ns = int(rec.get("t_mtime_ns") or 0)
+    t_size = int(rec.get("t_size") or 0)
+
+    # Check pbtxt title mtime if needed
+    pb_title = ""
+    pb_m_ns = -1
+    if need_title:
+        for ann_dir in (CLI_ANN_DIR, DESKTOP_ANN_DIR):
+            p = ann_dir / f"{cid}.pbtxt"
+            try:
+                pst = os.stat(p)
+                pb_m_ns = int(pst.st_mtime_ns)
+                if pb_m_ns != int(rec.get("pbtxt_mtime_ns", -1)) or not rec.get("title"):
+                    raw = p.read_text(encoding="utf-8", errors="replace")
+                    m = re.search(r'title:\s*"((?:[^"\\]|\\.)*)"', raw)
+                    if m:
+                        t = m.group(1).replace('\\"', '"').replace("\\\\", "\\").replace("\\n", " ").strip()
+                        if t:
+                            pb_title = t[:54]
+                    rec["pbtxt_mtime_ns"] = pb_m_ns
+                    if pb_title:
+                        rec["title"] = pb_title
+                break
+            except OSError:
+                continue
+
+    up_to_date = (
+        int(rec.get("hydrated_mtime_ns", -1)) == t_mtime_ns
+        and int(rec.get("hydrated_size", -1)) == t_size
+    )
+    if up_to_date and (not need_title or rec.get("title")) and (not need_steps or rec.get("step_count", 0) >= 0):
+        return
+
+    if not t_exists:
+        rec["hydrated_mtime_ns"] = t_mtime_ns
+        rec["hydrated_size"] = t_size
+        rec["step_count"] = 0
+        return
+
+    t_path_str = str(rec.get("t_path") or "")
+    try:
+        need_extract_title = need_title and not pb_title and (not rec.get("title") or not up_to_date)
+        extracted_title = ""
+        line_cnt = 0
+        with open(t_path_str, "rb") as fh:
+            for idx, raw_b in enumerate(fh):
+                line_cnt += 1
+                if need_extract_title and not extracted_title and idx <= 40 and b'"USER_INPUT"' in raw_b:
+                    try:
+                        obj = json.loads(raw_b.decode("utf-8", errors="replace"))
+                        if obj.get("type") == "USER_INPUT":
+                            cleaned = _clean_user_text(str(obj.get("content") or ""))
+                            if cleaned:
+                                cleaned = re.sub(r"@\[[^\]]+\]", "", cleaned)
+                                cleaned = re.sub(r"\s+", " ", cleaned).strip()
+                                extracted_title = cleaned[:40]
+                    except Exception:
+                        pass
+        rec["step_count"] = line_cnt
+        if extracted_title and not pb_title:
+            rec["title"] = extracted_title
+        rec["hydrated_mtime_ns"] = t_mtime_ns
+        rec["hydrated_size"] = t_size
+    except Exception:
+        pass
+
+
 def list_conversations(limit: int = 48, include_archived: bool = True) -> list[dict[str, Any]]:
+    global _DORMANT_SWEEP_CURSOR
     meta_sets = load_session_meta()
     pinned_ids = meta_sets["pinned"]
     archived_ids = meta_sets["archived"]
@@ -649,80 +1086,189 @@ def list_conversations(limit: int = 48, include_archived: bool = True) -> list[d
             child_cids.add(cid)
             children_by_parent.setdefault(parent_id, set()).add(cid)
 
-    all_candidate_cids = set(summaries.keys())
-    if BRAIN_DIR.is_dir():
+    # 1. Fast os.scandir() discovery of all brain dirs (CLI takes precedence over desktop if both exist)
+    cid_to_dir: dict[str, str] = {}
+    for scan_dir in (BRAIN_DIR, CLI_BRAIN_DIR):
+        if not scan_dir.is_dir():
+            continue
         try:
-            for d in BRAIN_DIR.iterdir():
-                if d.is_dir() and len(d.name) >= 32 and d.name != "tempmediaStorage":
-                    all_candidate_cids.add(d.name)
-        except Exception:
+            with os.scandir(scan_dir) as it:
+                for entry in it:
+                    nm = entry.name
+                    if len(nm) >= 32 and nm != "tempmediaStorage" and entry.is_dir(follow_symlinks=False):
+                        cid_to_dir[nm] = entry.path
+        except OSError:
             pass
 
-    for pid in list(all_candidate_cids):
-        for _, m_info in _read_swarm_child_ids(pid):
-            w_cid = str(m_info.get("conversation_id") or "").strip()
-            if w_cid and w_cid != pid:
+    all_candidate_cids = set(summaries.keys()) | set(cid_to_dir.keys())
+
+    with _OPHANIM_CLI_LOCK:
+        running_cli_cids = {k for k, p in _OPHANIM_CLI_PROCS.items() if p is not None and p.poll() is None}
+
+    # 2. Detect revived old conversations via flat .db/.pb dir scandir (zero extra syscalls)
+    dirty_flat_cids = _scan_flat_conv_dirty_cids()
+
+    with _CONV_CACHE_LOCK:
+        # Remove deleted/gone dirs from cache
+        for cached_cid in list(_CONV_META_CACHE.keys()):
+            if cached_cid not in all_candidate_cids:
+                _CONV_META_CACHE.pop(cached_cid, None)
+
+        # Decide which CIDs need fresh os.stat(transcript.jsonl) this call:
+        # - Any brand new CID not yet in cache
+        # - Any CID touched in flat conv dirs, pinned, CLI-running, or present in LS summaries
+        # - Top (limit + 16) most recent cached CIDs
+        # - Plus a small rotating slice (32) of dormant CIDs so even untracked edits get picked up with <0.5ms cost
+        cached_sorted = sorted(
+            _CONV_META_CACHE.items(),
+            key=lambda kv: float(kv[1].get("t_mtime") or 0.0),
+            reverse=True,
+        )
+        hot_limit = max(limit + 16, 64)
+        hot_cids: set[str] = {k for k, _ in cached_sorted[:hot_limit]}
+        hot_cids.update(pinned_ids)
+        hot_cids.update(running_cli_cids)
+        hot_cids.update(dirty_flat_cids)
+        hot_cids.update(summaries.keys())
+
+        dormant_keys = [k for k, _ in cached_sorted[hot_limit:]]
+        if dormant_keys:
+            start_i = _DORMANT_SWEEP_CURSOR % len(dormant_keys)
+            batch_n = min(32, len(dormant_keys))
+            for off in range(batch_n):
+                hot_cids.add(dormant_keys[(start_i + off) % len(dormant_keys)])
+            _DORMANT_SWEEP_CURSOR = (start_i + batch_n) % len(dormant_keys)
+
+        for cid in all_candidate_cids:
+            bdir = cid_to_dir.get(cid)
+            if not bdir:
+                continue
+            existing_rec = _CONV_META_CACHE.get(cid)
+            if existing_rec is None or cid in hot_cids or existing_rec.get("brain_dir") != bdir:
+                rec = _stat_cid_entry(cid, bdir, existing_rec)
+                _CONV_META_CACHE[cid] = rec
+                _CONV_META_CACHE.move_to_end(cid)
+            else:
+                rec = existing_rec
+
+            for w_cid in rec.get("child_ids") or ():
                 child_cids.add(w_cid)
-                children_by_parent.setdefault(pid, set()).add(w_cid)
+                children_by_parent.setdefault(cid, set()).add(w_cid)
 
-    results: list[dict[str, Any]] = []
-    for cid in all_candidate_cids:
-        if cid in child_cids or cid in deleted_ids or cid == "tempmediaStorage":
-            continue
-        is_archived = cid in archived_ids
-        if is_archived and not include_archived:
-            continue
-        info = summaries.get(cid) if isinstance(summaries.get(cid), dict) else {}
-        t_path = BRAIN_DIR / cid / ".system_generated/logs/transcript.jsonl"
-        if not info and not t_path.is_file():
-            continue
+        while len(_CONV_META_CACHE) > _CONV_META_MAX:
+            _CONV_META_CACHE.popitem(last=False)
 
-        status_raw = str(info.get("status") or "CASCADE_RUN_STATUS_IDLE")
-        status = "running" if "RUNNING" in status_raw else "idle"
+        # 3. Cheap sort BEFORE hydrating title/stepCount/lastCompletedTurn!
+        prelim: list[tuple[int, int, float, str, dict[str, Any], dict[str, Any] | None, str, str, str]] = []
+        for cid in all_candidate_cids:
+            if cid in child_cids or cid in deleted_ids or cid == "tempmediaStorage":
+                continue
+            is_archived = cid in archived_ids
+            if is_archived and not include_archived:
+                continue
+            info = summaries.get(cid) if isinstance(summaries.get(cid), dict) else {}
+            rec = _CONV_META_CACHE.get(cid)
+            if not info and (rec is None or not rec.get("t_exists")):
+                continue
 
-        annotations = info.get("annotations") if isinstance(info.get("annotations"), dict) else {}
-        title = str(annotations.get("title") or info.get("summary") or "").strip()
-        if not title:
-            title = _extract_first_user_title(cid) or f"对话 {cid[:8]}"
+            is_cli_run = cid in running_cli_cids
+            status_raw = str(
+                info.get("status") or ("CASCADE_RUN_STATUS_RUNNING" if is_cli_run else "CASCADE_RUN_STATUS_IDLE")
+            )
+            status = "running" if ("RUNNING" in status_raw or is_cli_run) else "idle"
 
-        t_mtime = 0.0
-        if t_path.is_file():
-            try:
-                t_mtime = t_path.stat().st_mtime
-            except OSError:
-                pass
-        updated_str = str(info.get("lastModifiedTime") or info.get("createdTime") or "")
-        updated_epoch = max(_parse_iso_epoch(updated_str, t_mtime), t_mtime)
-        if not updated_str and updated_epoch > 0:
-            updated_str = datetime.fromtimestamp(updated_epoch, tz=timezone.utc).isoformat()
+            t_mtime = float(rec.get("t_mtime") or 0.0) if rec else 0.0
+            updated_str = str(info.get("lastModifiedTime") or info.get("createdTime") or "")
+            updated_epoch = max(_parse_iso_epoch(updated_str, t_mtime), t_mtime)
+            is_pinned = cid in pinned_ids
+            prelim.append((
+                1 if is_archived else 0,
+                0 if is_pinned else 1,
+                -updated_epoch,
+                cid,
+                info,
+                rec,
+                status,
+                status_raw,
+                updated_str,
+            ))
 
-        step_count = int(info.get("stepCount") or 0)
-        if step_count == 0 and t_path.is_file():
-            try:
-                with open(t_path, "rb") as fh:
-                    step_count = sum(1 for _ in fh)
-            except Exception:
-                pass
+        prelim.sort(key=lambda x: (x[0], x[1], x[2]))
 
-        subagent_total = max(len(children_by_parent.get(cid, set())), len(_read_swarm_child_ids(cid)))
-        is_pinned = cid in pinned_ids
-        last_done_meta = _peek_last_completed_turn_meta(t_path, status) if (status == "running" or len(results) < 16) else None
-        results.append({
-            "id": cid,
-            "shortId": cid[:8],
-            "title": title[:54],
-            "status": status,
-            "statusRaw": status_raw,
-            "stepCount": step_count,
-            "subagentCount": subagent_total,
-            "pinned": is_pinned,
-            "archived": is_archived,
-            "updatedAt": updated_str,
-            "updatedEpoch": round(updated_epoch, 3),
-            "lastCompletedTurn": last_done_meta,
-        })
+        # Keep top `limit` plus any running conversations (even if beyond limit)
+        selected = prelim[:limit]
+        selected_ids = {item[3] for item in selected}
+        for item in prelim[limit:]:
+            if item[6] == "running" and item[3] not in selected_ids:
+                selected.append(item)
 
-    results.sort(key=lambda x: (1 if x.get("archived") else 0, 0 if x.get("pinned") else 1, -float(x["updatedEpoch"])))
+        # 4. Hydrate ONLY the selected top `limit` + running CIDs (zero reads when cached!)
+        results: list[dict[str, Any]] = []
+        for idx_sel, (arch_ord, pin_ord, neg_ep, cid, info, rec, status, status_raw, updated_str) in enumerate(selected):
+            updated_epoch = -neg_ep
+            if not updated_str and updated_epoch > 0:
+                updated_str = datetime.fromtimestamp(updated_epoch, tz=timezone.utc).isoformat()
+
+            annotations = info.get("annotations") if isinstance(info.get("annotations"), dict) else {}
+            title = str(annotations.get("title") or info.get("summary") or "").strip()
+            step_count = int(info.get("stepCount") or 0)
+
+            if rec is not None:
+                _hydrate_cid_title_and_steps(
+                    cid,
+                    rec,
+                    need_title=(not title),
+                    need_steps=(step_count == 0),
+                )
+                if not title:
+                    title = str(rec.get("title") or "")
+                if step_count == 0:
+                    step_count = int(rec.get("step_count") or 0)
+
+            if not title:
+                title = f"对话 {cid[:8]}"
+
+            cached_children = len(rec.get("child_ids") or ()) if rec else 0
+            subagent_total = max(len(children_by_parent.get(cid, set())), cached_children)
+
+            last_done_meta = None
+            if rec is not None and rec.get("t_exists") and (status == "running" or idx_sel < 16):
+                # Release lock while parsing transcript on cache miss
+                t_path_obj = Path(str(rec["t_path"]))
+                t_m_ns = int(rec.get("t_mtime_ns") or 0)
+                t_sz = int(rec.get("t_size") or 0)
+                cached_done = _LAST_DONE_META_CACHE.get(str(t_path_obj))
+                if cached_done and cached_done[0] == t_m_ns and cached_done[1] == t_sz and cached_done[2] == status:
+                    _LAST_DONE_META_CACHE.move_to_end(str(t_path_obj))
+                    last_done_meta = cached_done[3]
+                else:
+                    # Will hydrate right below outside lock if needed
+                    last_done_meta = ("__NEEDS_PEEK__", t_path_obj, status, t_m_ns, t_sz)
+
+            results.append({
+                "id": cid,
+                "shortId": cid[:8],
+                "title": title[:54],
+                "status": status,
+                "statusRaw": status_raw,
+                "stepCount": step_count,
+                "subagentCount": subagent_total,
+                "pinned": pin_ord == 0,
+                "archived": arch_ord == 1,
+                "updatedAt": updated_str,
+                "updatedEpoch": round(updated_epoch, 3),
+                "lastCompletedTurn": last_done_meta,
+            })
+
+    # Complete any cold _peek_last_completed_turn_meta misses outside _CONV_CACHE_LOCK
+    for item in results:
+        lct = item.get("lastCompletedTurn")
+        if isinstance(lct, tuple) and lct and lct[0] == "__NEEDS_PEEK__":
+            _, t_path_obj, st_str, t_m_ns, t_sz = lct
+            item["lastCompletedTurn"] = _peek_last_completed_turn_meta(
+                t_path_obj, st_str, mtime_ns=t_m_ns, size=t_sz
+            )
+
     return results[:limit]
 
 
@@ -826,8 +1372,9 @@ def _build_worker_detail(
         })
 
     if worker_cid:
-        full_t_path = BRAIN_DIR / worker_cid / ".system_generated/logs/transcript_full.jsonl"
-        compact_t_path = BRAIN_DIR / worker_cid / ".system_generated/logs/transcript.jsonl"
+        w_bdir = _resolve_brain_dir(worker_cid)
+        full_t_path = w_bdir / ".system_generated/logs/transcript_full.jsonl"
+        compact_t_path = w_bdir / ".system_generated/logs/transcript.jsonl"
         chosen_t = full_t_path if full_t_path.is_file() else compact_t_path
         if chosen_t.is_file():
             try:
@@ -1312,19 +1859,24 @@ def _build_numbered_turns(messages: list[dict[str, Any]], conv_status: str) -> l
     return turns
 
 
-def build_conversation_snapshot(cid: str) -> dict[str, Any]:
+def build_conversation_snapshot(
+    cid: str,
+    summaries: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     cid = str(cid or "").strip()
-    summaries = _fetch_all_summaries_safe()
+    if summaries is None:
+        summaries = _fetch_all_summaries_safe()
     info = summaries.get(cid) if isinstance(summaries.get(cid), dict) else {}
-    status_raw = str(info.get("status") or "CASCADE_RUN_STATUS_IDLE")
-    status = "running" if "RUNNING" in status_raw else "idle"
+    status_raw = str(info.get("status") or ("CASCADE_RUN_STATUS_RUNNING" if _is_cli_proc_running(cid) else "CASCADE_RUN_STATUS_IDLE"))
+    status = "running" if ("RUNNING" in status_raw or _is_cli_proc_running(cid)) else "idle"
 
     annotations = info.get("annotations") if isinstance(info.get("annotations"), dict) else {}
     title = str(annotations.get("title") or info.get("summary") or "").strip()
     if not title:
         title = _extract_first_user_title(cid) or (f"新对话 {cid[:8]}" if cid else "新建对话")
 
-    main_t_path = BRAIN_DIR / cid / ".system_generated/logs/transcript.jsonl"
+    cid_brain_dir = _resolve_brain_dir(cid)
+    main_t_path = cid_brain_dir / ".system_generated/logs/transcript.jsonl"
     messages, all_file_events, detected_model, main_tok_stats = _extract_file_touches_from_transcript(main_t_path)
 
     if not messages and cid:
@@ -1379,7 +1931,7 @@ def build_conversation_snapshot(cid: str) -> dict[str, Any]:
     workers: list[dict[str, Any]] = []
     seen_worker_cids: set[str] = set()
 
-    swarm_dir = BRAIN_DIR / cid / ".system_generated/swarm"
+    swarm_dir = cid_brain_dir / ".system_generated/swarm"
     briefs_by_name: dict[str, str] = {}
     full_briefs_by_name: dict[str, str] = {}
     board_posts_by_name: dict[str, list[dict[str, str]]] = {}
@@ -1484,7 +2036,7 @@ def build_conversation_snapshot(cid: str) -> dict[str, Any]:
     tot_cache_tok = int(main_tok_stats["cacheReadTokens"])
 
     for w_cid in seen_worker_cids:
-        wt_path = BRAIN_DIR / w_cid / ".system_generated/logs/transcript.jsonl"
+        wt_path = _resolve_brain_dir(w_cid) / ".system_generated/logs/transcript.jsonl"
         if wt_path.is_file():
             child_turn = max_user_turn if (
                 main_t_path.is_file() and abs(wt_path.stat().st_mtime - main_t_path.stat().st_mtime) < 180.0
@@ -1733,9 +2285,11 @@ class ConversationLiveTracker:
     def __init__(self) -> None:
         self.bound_cid: str = ""
         self.file_offsets: dict[str, int] = {}
+        self.board_offset: int = 0
         self.last_board_seq: int = 0
         self.last_status: str = "idle"
         self.last_msg_sig: tuple[int, str] = (0, "")
+        self.last_running_snap_mono: float = 0.0
         self.pending_returns: dict[str, list[dict[str, Any]]] = {}
 
     def bind(self, cid: str) -> None:
@@ -1743,22 +2297,26 @@ class ConversationLiveTracker:
         self.bound_cid = cid
         self.file_offsets.clear()
         self.pending_returns.clear()
+        self.board_offset = 0
         self.last_board_seq = 0
+        self.last_running_snap_mono = 0.0
         if not cid:
             return
-        main_t = BRAIN_DIR / cid / ".system_generated/logs/transcript.jsonl"
+        main_t = _resolve_brain_dir(cid) / ".system_generated/logs/transcript.jsonl"
         if main_t.is_file():
             self.file_offsets[str(main_t)] = main_t.stat().st_size
         for _, w_info in _read_swarm_child_ids(cid):
             w_cid = str(w_info.get("conversation_id") or "").strip()
             if w_cid:
-                wt = BRAIN_DIR / w_cid / ".system_generated/logs/transcript.jsonl"
+                wt = _resolve_brain_dir(w_cid) / ".system_generated/logs/transcript.jsonl"
                 if wt.is_file():
                     self.file_offsets[str(wt)] = wt.stat().st_size
-        board_f = BRAIN_DIR / cid / ".system_generated/swarm/board.jsonl"
+        board_f = _resolve_brain_dir(cid) / ".system_generated/swarm/board.jsonl"
         if board_f.is_file():
             try:
-                for ln in board_f.read_text(encoding="utf-8", errors="replace").splitlines():
+                raw_b = board_f.read_bytes()
+                self.board_offset = len(raw_b)
+                for ln in raw_b.decode("utf-8", errors="replace").splitlines():
                     if ln.strip():
                         self.last_board_seq = max(self.last_board_seq, int(json.loads(ln).get("seq") or 0))
             except Exception:
@@ -1783,10 +2341,10 @@ class ConversationLiveTracker:
         worker_index_by_name = {name: idx for idx, (name, _) in enumerate(swarm_workers[:12])}
 
         watched_paths: list[tuple[Path, int | None]] = [
-            (BRAIN_DIR / cid / ".system_generated/logs/transcript.jsonl", None)
+            (_resolve_brain_dir(cid) / ".system_generated/logs/transcript.jsonl", None)
         ]
         for w_cid, w_idx in worker_index_by_cid.items():
-            watched_paths.append((BRAIN_DIR / w_cid / ".system_generated/logs/transcript.jsonl", w_idx))
+            watched_paths.append((_resolve_brain_dir(w_cid) / ".system_generated/logs/transcript.jsonl", w_idx))
 
         for t_path, worker_idx in watched_paths:
             if not t_path.is_file():
@@ -1918,40 +2476,51 @@ class ConversationLiveTracker:
             except Exception as exc:
                 logger.debug("Incremental chunk error: %s", exc)
 
-        board_f = BRAIN_DIR / cid / ".system_generated/swarm/board.jsonl"
+        board_f = _resolve_brain_dir(cid) / ".system_generated/swarm/board.jsonl"
         if board_f.is_file():
             try:
-                for bln in board_f.read_text(encoding="utf-8", errors="replace").splitlines():
-                    if not bln.strip():
-                        continue
-                    b_obj = json.loads(bln)
-                    seq = int(b_obj.get("seq") or 0)
-                    if seq > self.last_board_seq:
-                        self.last_board_seq = seq
-                        has_new_lines = True
-                        sender = str(b_obj.get("agent") or "")
-                        btxt = str(b_obj.get("text") or "")
-                        if sender == "coordinator":
-                            targets = [idx for nm, idx in worker_index_by_name.items() if f"@{nm}" in btxt]
-                            for idx in (targets or [0])[:3]:
-                                beam_events.append({"op": "swarm_beam", "workerIdx": idx, "dir": "carbon_to_star"})
-                        elif sender in worker_index_by_name:
-                            beam_events.append({
-                                "op": "swarm_beam",
-                                "workerIdx": worker_index_by_name[sender],
-                                "dir": "star_to_carbon",
-                            })
+                cur_bsz = board_f.stat().st_size
+                if cur_bsz < self.board_offset:
+                    self.board_offset = 0
+                if cur_bsz > self.board_offset:
+                    with open(board_f, "rb") as bfh:
+                        bfh.seek(self.board_offset)
+                        b_chunk = bfh.read(cur_bsz - self.board_offset).decode("utf-8", errors="replace")
+                    self.board_offset = cur_bsz
+                    for bln in b_chunk.splitlines():
+                        if not bln.strip():
+                            continue
+                        b_obj = json.loads(bln)
+                        seq = int(b_obj.get("seq") or 0)
+                        if seq > self.last_board_seq:
+                            self.last_board_seq = seq
+                            has_new_lines = True
+                            sender = str(b_obj.get("agent") or "")
+                            btxt = str(b_obj.get("text") or "")
+                            if sender == "coordinator":
+                                targets = [idx for nm, idx in worker_index_by_name.items() if f"@{nm}" in btxt]
+                                for idx in (targets or [0])[:3]:
+                                    beam_events.append({"op": "swarm_beam", "workerIdx": idx, "dir": "carbon_to_star"})
+                            elif sender in worker_index_by_name:
+                                beam_events.append({
+                                    "op": "swarm_beam",
+                                    "workerIdx": worker_index_by_name[sender],
+                                    "dir": "star_to_carbon",
+                                })
             except Exception:
                 pass
 
         summaries = _fetch_all_summaries_safe()
         info = summaries.get(cid) if isinstance(summaries.get(cid), dict) else {}
-        cur_status = "running" if "RUNNING" in str(info.get("status") or "") else "idle"
+        cur_status = "running" if ("RUNNING" in str(info.get("status") or "") or _is_cli_proc_running(cid)) else "idle"
         status_changed = cur_status != self.last_status
         self.last_status = cur_status
 
-        if has_new_lines or status_changed or cur_status == "running":
-            snap = build_conversation_snapshot(cid)
+        now_m = time.monotonic()
+        running_periodic_due = (cur_status == "running") and ((now_m - self.last_running_snap_mono) >= 5.0)
+        if has_new_lines or status_changed or running_periodic_due:
+            self.last_running_snap_mono = now_m
+            snap = build_conversation_snapshot(cid, summaries=summaries)
             turns = snap.get("turns") or []
             last_t_txt = turns[-1]["assistantText"][:96] if turns else ""
             done_cnt = sum(1 for tr in turns if tr.get("hasFinalReply"))
@@ -2027,24 +2596,179 @@ def _load_best_cascade_config(target_cid: str, model_key: str = "inherit") -> di
     return cfg if isinstance(cfg, dict) else {}
 
 
-def create_new_conversation(focus_ide: bool = True) -> dict[str, Any]:
-    resp = agy_rpc(
-        "StartCascade",
-        {
-            "source": "CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT",
-            "trajectoryType": "CORTEX_TRAJECTORY_TYPE_CASCADE",
-        },
-        timeout=10.0,
-    )
-    new_cid = str(resp.get("cascadeId") or "").strip()
-    if not new_cid:
-        raise RuntimeError("StartCascade 未返回有效会话 ID")
-    if focus_ide:
+def _send_via_agy_cli_ophanim(
+    target_cid: str,
+    exact_text: str,
+    model_key: str = "inherit",
+    staged_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    """官方 `agy.exe` 非阻塞流式执行通道（当桌面 LS 返回 401 时由 Ophanim 自动接管）。"""
+    agy_bin = _find_agy_cli_bin()
+    if not agy_bin:
+        return {"ok": False, "error": "桌面端 LS 返回 401 且未找到官方 agy CLI（请配置 PATH 或 OPHANIM_AGY_BIN 环境变量）"}
+
+    req_cid = str(target_cid or "").strip()
+    is_new_req = (not req_cid) or req_cid == "__new__" or req_cid.startswith("cli-new-")
+    resume_cli_cid = ""
+    source_desktop_cid = ""
+    desktop_ctx = ""
+
+    if not is_new_req:
+        if (CLI_CONV_DIR / f"{req_cid}.db").is_file():
+            resume_cli_cid = req_cid
+        else:
+            with _OPHANIM_CLI_LOCK:
+                aliased = _OPHANIM_CLI_ALIAS.get(req_cid, "")
+            if aliased and (CLI_CONV_DIR / f"{aliased}.db").is_file():
+                resume_cli_cid = aliased
+            elif (BRAIN_DIR / req_cid / ".system_generated/logs/transcript.jsonl").is_file():
+                source_desktop_cid = req_cid
+                t_path = BRAIN_DIR / req_cid / ".system_generated/logs/transcript.jsonl"
+                try:
+                    msgs, _, _, _ = _extract_file_touches_from_transcript(t_path)
+                    recent_m = msgs[-6:]
+                    ctx_lines = [f"【衔接桌面端 Antigravity 会话（{_extract_first_user_title(req_cid) or req_cid[:8]}）】"]
+                    for m_it in recent_m:
+                        role_lbl = "用户" if m_it.get("role") == "user" else "助手"
+                        txt_m = str(m_it.get("text") or "").strip()
+                        if txt_m:
+                            ctx_lines.append(f"[{role_lbl}] {txt_m[:1500]}")
+                    desktop_ctx = "\n".join(ctx_lines)[-5000:]
+                except Exception:
+                    desktop_ctx = ""
+
+    eff_model = str(model_key or "").strip()
+    if not eff_model or eff_model == "inherit":
+        eff_model = "gemini-4-neon-medium"
+
+    prompt_parts: list[str] = []
+    if desktop_ctx:
+        prompt_parts.append(desktop_ctx)
+        prompt_parts.append("【用户在 Ophanim 圣殿中针对以上会话的最新指令】")
+    if staged_paths:
+        att_lines = "\n".join(f"- {p}" for p in staged_paths)
+        prompt_parts.append(f"【用户附带的本地文件/图片路径（可用 read_file 查看）】\n{att_lines}")
+    if exact_text.strip():
+        prompt_parts.append(exact_text)
+    full_prompt = "\n\n".join(prompt_parts).strip() or "请查看附带的文件"
+    if len(full_prompt) > 24000:
+        full_prompt = full_prompt[-24000:]
+
+    cmd = [
+        agy_bin,
+        "-p",
+        full_prompt,
+        "--model",
+        eff_model,
+        "--dangerously-skip-permissions",
+        "--output-format",
+        "stream-json",
+    ]
+    if resume_cli_cid:
+        cmd.extend(["--conversation", resume_cli_cid])
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=_resolve_agy_cli_cwd(),
+            env=_build_cli_env_oph(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_NO_WINDOW if os.name == "nt" else 0,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": f"启动官方 agy.exe 失败: {exc}"}
+
+    init_evt = threading.Event()
+    cid_holder: dict[str, str] = {"cid": resume_cli_cid}
+
+    def _watch_cli() -> None:
+        bound_cid = resume_cli_cid
         try:
-            agy_rpc("SmartFocusConversation", {"cascadeId": new_cid}, timeout=3.0)
+            if proc.stdout is not None:
+                for raw_ln in proc.stdout:
+                    s_ln = raw_ln.strip()
+                    if not s_ln:
+                        continue
+                    try:
+                        ev = json.loads(s_ln)
+                    except Exception:
+                        continue
+                    if isinstance(ev, dict):
+                        cid_ev = str(ev.get("conversation_id") or ((ev.get("step_update") or {}).get("conversation_id")) or ((ev.get("result") or {}).get("conversation_id")) or "").strip()
+                        if cid_ev and not bound_cid:
+                            bound_cid = cid_ev
+                            cid_holder["cid"] = cid_ev
+                            with _OPHANIM_CLI_LOCK:
+                                _OPHANIM_CLI_PROCS[cid_ev] = proc
+                                if source_desktop_cid and source_desktop_cid != cid_ev:
+                                    _OPHANIM_CLI_ALIAS[source_desktop_cid] = cid_ev
+                            init_evt.set()
+            proc.wait(timeout=1200)
         except Exception:
             pass
-    return {"ok": True, "cascadeId": new_cid}
+        finally:
+            if proc.stdout is not None:
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+            try:
+                if proc.poll() is None:
+                    proc.wait(timeout=5)
+            except Exception:
+                pass
+            if bound_cid:
+                with _OPHANIM_CLI_LOCK:
+                    if _OPHANIM_CLI_PROCS.get(bound_cid) is proc:
+                        _OPHANIM_CLI_PROCS.pop(bound_cid, None)
+            init_evt.set()
+
+    if resume_cli_cid:
+        with _OPHANIM_CLI_LOCK:
+            _OPHANIM_CLI_PROCS[resume_cli_cid] = proc
+
+    threading.Thread(target=_watch_cli, daemon=True).start()
+    if not cid_holder["cid"]:
+        init_evt.wait(timeout=8.0)
+
+    final_cid = cid_holder["cid"] or resume_cli_cid or f"cli-{uuid.uuid4().hex[:12]}"
+    return {
+        "ok": True,
+        "cascadeId": final_cid,
+        "createdNew": bool(is_new_req or (source_desktop_cid and final_cid != source_desktop_cid)),
+        "flushedNow": False,
+        "stagedPaths": staged_paths or [],
+        "backend": "agy_cli",
+    }
+
+
+def create_new_conversation(focus_ide: bool = True) -> dict[str, Any]:
+    try:
+        resp = agy_rpc(
+            "StartCascade",
+            {
+                "source": "CORTEX_TRAJECTORY_SOURCE_CASCADE_CLIENT",
+                "trajectoryType": "CORTEX_TRAJECTORY_TYPE_CASCADE",
+            },
+            timeout=10.0,
+        )
+        new_cid = str(resp.get("cascadeId") or "").strip()
+        if not new_cid:
+            raise RuntimeError("StartCascade 未返回有效会话 ID")
+        if focus_ide:
+            try:
+                agy_rpc("SmartFocusConversation", {"cascadeId": new_cid}, timeout=3.0)
+            except Exception:
+                pass
+        return {"ok": True, "cascadeId": new_cid}
+    except Exception:
+        if _find_agy_cli_bin():
+            return {"ok": True, "cascadeId": f"cli-new-{uuid.uuid4().hex[:8]}", "backend": "agy_cli"}
+        raise
 
 
 def _sanitize_upload_filename(raw_name: str) -> str:
@@ -2082,30 +2806,13 @@ def send_verbatim_message(
     attachments: list[dict[str, Any]] | None = None,
     send_mode: str = "queue",
 ) -> dict[str, Any]:
-    """Send `raw_text` 100% VERBATIM plus any dropped images/files natively into Antigravity.
-
-    `send_mode`:
-      - `"queue"` (default): normal send (queues if cascade is currently running).
-      - `"interrupt"` / `"send_now"`: sends AND immediately calls `SendAllQueuedMessages` to push into active run!
-    """
+    """Send `raw_text` 100% VERBATIM plus any dropped images/files natively into Antigravity (auto-fallback to official `agy.exe` CLI on 44.9.1+ LS 401)."""
     exact_text = "" if raw_text is None else str(raw_text)
     att_list = [a for a in (attachments or []) if isinstance(a, dict)]
     if not exact_text.strip() and not att_list:
         return {"ok": False, "error": "消息内容与附件不能同时为空"}
 
     target_cid = str(cascade_id or "").strip()
-    created_new = False
-
-    if not target_cid or target_cid == "__new__":
-        started = create_new_conversation(focus_ide=focus_ide)
-        target_cid = started["cascadeId"]
-        created_new = True
-    elif focus_ide:
-        try:
-            agy_rpc("SmartFocusConversation", {"cascadeId": target_cid}, timeout=3.0)
-        except Exception:
-            pass
-
     items_payload: list[dict[str, Any]] = []
     media_payload: list[dict[str, Any]] = []
     staged_paths: list[str] = []
@@ -2137,19 +2844,43 @@ def send_verbatim_message(
             })
             items_payload.append({"text": " "})
 
-    items_payload.append({"text": exact_text if exact_text.strip() else " "})
+    if (
+        time.time() < _LS_RPC_FAIL_UNTIL
+        or target_cid.startswith("cli-new-")
+        or (target_cid and (CLI_CONV_DIR / f"{target_cid}.db").is_file())
+    ):
+        return _send_via_agy_cli_ophanim(target_cid, exact_text, model_key=model_key, staged_paths=staged_paths)
 
-    cascade_cfg = _load_best_cascade_config(target_cid, model_key=model_key)
-    send_payload: dict[str, Any] = {
-        "cascadeId": target_cid,
-        "items": items_payload,
-    }
-    if media_payload:
-        send_payload["media"] = media_payload
-    if cascade_cfg:
-        send_payload["cascadeConfig"] = cascade_cfg
+    created_new = False
+    try:
+        if not target_cid or target_cid == "__new__":
+            started = create_new_conversation(focus_ide=focus_ide)
+            target_cid = started["cascadeId"]
+            created_new = True
+            if started.get("backend") == "agy_cli" or target_cid.startswith("cli-new-"):
+                return _send_via_agy_cli_ophanim(target_cid, exact_text, model_key=model_key, staged_paths=staged_paths)
+        elif focus_ide:
+            try:
+                agy_rpc("SmartFocusConversation", {"cascadeId": target_cid}, timeout=3.0)
+            except Exception:
+                pass
 
-    agy_rpc("SendUserCascadeMessage", send_payload, timeout=20.0)
+        items_payload.append({"text": exact_text if exact_text.strip() else " "})
+        cascade_cfg = _load_best_cascade_config(target_cid, model_key=model_key)
+        send_payload: dict[str, Any] = {
+            "cascadeId": target_cid,
+            "items": items_payload,
+        }
+        if media_payload:
+            send_payload["media"] = media_payload
+        if cascade_cfg:
+            send_payload["cascadeConfig"] = cascade_cfg
+
+        agy_rpc("SendUserCascadeMessage", send_payload, timeout=20.0)
+    except Exception:
+        if _find_agy_cli_bin():
+            return _send_via_agy_cli_ophanim(target_cid, exact_text, model_key=model_key, staged_paths=staged_paths)
+        raise
 
     flushed_now = False
     norm_mode = str(send_mode or "queue").strip().lower()
@@ -2201,10 +2932,18 @@ def delete_queued_step(cascade_id: str, step_index: int) -> dict[str, Any]:
 
 
 def cancel_cascade_execution(cascade_id: str) -> dict[str, Any]:
-    """Immediately pause / stop an actively running Antigravity cascade execution (`CancelCascadeInvocation`)."""
+    """Immediately pause / stop an actively running Antigravity cascade or CLI execution."""
     target_cid = str(cascade_id or "").strip()
     if not target_cid or target_cid == "__new__":
         return {"ok": False, "action": "cancel", "error": "无效的会话 ID"}
+    with _OPHANIM_CLI_LOCK:
+        proc = _OPHANIM_CLI_PROCS.pop(target_cid, None)
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        return {"ok": True, "cascadeId": target_cid, "action": "cancel", "backend": "agy_cli"}
     last_err = ""
     for rpc_method, payload in (
         ("CancelCascadeInvocation", {"cascadeId": target_cid}),

@@ -2860,7 +2860,7 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         fov: 65,
         panelOpacity: 0.86,
         hudVisible: true,
-        ornamentalVisible: true,
+        ornamentalVisible: !IS_WALLPAPER_MODE,
         topologyOverlay: true,
         wireframeXray: false,
         audioEnabled: false,
@@ -3011,12 +3011,71 @@ Click patterned eye on outer ring to open file or file location.</textarea>
 
       const camera = new THREE.PerspectiveCamera(state.fov, window.innerWidth / window.innerHeight, 0.04, 1200);
 
-      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      function computeTargetDpr() {
+        const rawDpr = window.devicePixelRatio || 1;
+        if (IS_WALLPAPER_ECO) return Math.min(rawDpr, 1.0);
+        if (IS_WALLPAPER_MODE) return Math.min(rawDpr, 1.25);
+        return Math.min(rawDpr, 2);
+      }
+
+      const renderer = new THREE.WebGLRenderer({
+        antialias: !IS_WALLPAPER_ECO,
+        alpha: true,
+        powerPreference: IS_WALLPAPER_MODE ? (IS_WALLPAPER_ECO ? 'low-power' : 'default') : 'high-performance'
+      });
+      let dpr = computeTargetDpr();
       renderer.setPixelRatio(dpr);
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.setClearColor(0x050507, 0.0);
       container.appendChild(renderer.domElement);
+
+      let wpOccluded = false;
+      let webglContextLost = false;
+      let animateRafId = null;
+      let lastMs = performance.now();
+      let lastEcoRenderMs = 0;
+
+      function shouldPauseRenderLoop() {
+        return Boolean(webglContextLost || document.hidden || (IS_WALLPAPER_MODE && wpOccluded));
+      }
+
+      function pauseRenderLoopIfNeeded() {
+        if (shouldPauseRenderLoop() && animateRafId !== null) {
+          cancelAnimationFrame(animateRafId);
+          animateRafId = null;
+        }
+      }
+
+      function resumeRenderLoopIfNeeded() {
+        if (!shouldPauseRenderLoop() && animateRafId === null && typeof animate === 'function') {
+          lastMs = performance.now();
+          lastEcoRenderMs = 0;
+          animateRafId = requestAnimationFrame(animate);
+        }
+      }
+
+      renderer.domElement.addEventListener('webglcontextlost', function (e) {
+        e.preventDefault();
+        webglContextLost = true;
+        pauseRenderLoopIfNeeded();
+      }, false);
+
+      renderer.domElement.addEventListener('webglcontextrestored', function () {
+        webglContextLost = false;
+        dpr = computeTargetDpr();
+        renderer.setPixelRatio(dpr);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        resizeHudCanvas();
+        resumeRenderLoopIfNeeded();
+      }, false);
+
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+          pauseRenderLoopIfNeeded();
+        } else {
+          resumeRenderLoopIfNeeded();
+        }
+      });
 
       function resizeHudCanvas() {
         hudCanvas.width = Math.floor(window.innerWidth * dpr);
@@ -7126,6 +7185,7 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           tooltipEl.classList.add('visible');
         } else {
           hoveredItem = null;
+          if (IS_WALLPAPER_MODE) return;
           const ringHoverHits = raycaster.intersectObjects(middleDragRingColliders, false);
           container.style.cursor = camCtrl.isDragging ? 'grabbing' : (ringHoverHits.length > 0 ? 'grab' : 'crosshair');
           tooltipEl.classList.remove('visible');
@@ -7165,6 +7225,9 @@ Click patterned eye on outer ring to open file or file location.</textarea>
       const arcballCamUp = new THREE.Vector3();
       const arcballCamBack = new THREE.Vector3();
       const arcballDeltaQuat = new THREE.Quaternion();
+      const tmpPanRight = new THREE.Vector3();
+      const tmpPanUp = new THREE.Vector3();
+      const tmpPanFwd = new THREE.Vector3();
 
       // Shoemake 3D Sphere + Hyperbolic-Sheet Arcball centered on Ophanim Origin (0,0,0):
       //   - Dragging tangentially along the outer ring spins it around the center like a dial!
@@ -7409,11 +7472,9 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         } else {
           const fovRad = (camera.fov * Math.PI) / 180.0;
           const worldPerPixel = (2.0 * camCtrl.radius * Math.tan(fovRad * 0.5)) / Math.max(1, window.innerHeight);
-          const right = new THREE.Vector3();
-          const up = new THREE.Vector3();
-          camera.matrix.extractBasis(right, up, new THREE.Vector3());
-          camCtrl.targetPan.addScaledVector(right, -dx * worldPerPixel);
-          camCtrl.targetPan.addScaledVector(up, dy * worldPerPixel);
+          camera.matrix.extractBasis(tmpPanRight, tmpPanUp, tmpPanFwd);
+          camCtrl.targetPan.addScaledVector(tmpPanRight, -dx * worldPerPixel);
+          camCtrl.targetPan.addScaledVector(tmpPanUp, dy * worldPerPixel);
           camCtrl.panOffset.copy(camCtrl.targetPan);
         }
       });
@@ -7536,11 +7597,9 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           const midX = (e.touches[0].clientX + e.touches[1].clientX) * 0.5;
           const midY = (e.touches[0].clientY + e.touches[1].clientY) * 0.5;
           const panScale = camCtrl.radius * 0.0014;
-          const right = new THREE.Vector3();
-          const up = new THREE.Vector3();
-          camera.matrix.extractBasis(right, up, new THREE.Vector3());
-          camCtrl.targetPan.addScaledVector(right, -(midX - camCtrl.lastPointer.x) * panScale);
-          camCtrl.targetPan.addScaledVector(up, (midY - camCtrl.lastPointer.y) * panScale);
+          camera.matrix.extractBasis(tmpPanRight, tmpPanUp, tmpPanFwd);
+          camCtrl.targetPan.addScaledVector(tmpPanRight, -(midX - camCtrl.lastPointer.x) * panScale);
+          camCtrl.targetPan.addScaledVector(tmpPanUp, (midY - camCtrl.lastPointer.y) * panScale);
           camCtrl.lastPointer.x = midX;
           camCtrl.lastPointer.y = midY;
         }
@@ -7564,6 +7623,9 @@ Click patterned eye on outer ring to open file or file location.</textarea>
       let prevWpBtnMask = 0;
       let lastWpSphereAckMs = 0;
       let wpLeftMovedBeyondClick = false;
+      let lastWpHoverRaycastMs = 0;
+      let lastWpHoverX = -9999;
+      let lastWpHoverY = -9999;
 
       function tryAcknowledgeWallpaperWhiteSphereClick(cx, cy, vw, vh) {
         const nowMs = performance.now();
@@ -7704,22 +7766,30 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           } else if (camCtrl.dragMode === 'pan') {
             const fovRad = (camera.fov * Math.PI) / 180.0;
             const worldPerPixel = (2.0 * camCtrl.radius * Math.tan(fovRad * 0.5)) / Math.max(1, vh);
-            const right = new THREE.Vector3();
-            const up = new THREE.Vector3();
-            camera.matrix.extractBasis(right, up, new THREE.Vector3());
-            camCtrl.targetPan.addScaledVector(right, -dx * worldPerPixel);
-            camCtrl.targetPan.addScaledVector(up, dy * worldPerPixel);
+            camera.matrix.extractBasis(tmpPanRight, tmpPanUp, tmpPanFwd);
+            camCtrl.targetPan.addScaledVector(tmpPanRight, -dx * worldPerPixel);
+            camCtrl.targetPan.addScaledVector(tmpPanUp, dy * worldPerPixel);
             camCtrl.panOffset.copy(camCtrl.targetPan);
           }
           return;
         }
 
-        // 4. Passive hover on desktop: file slabs turn smoothly toward mouse, 4-pointed stars stay untouched, zero modals!
+        // 4. Passive hover on desktop: throttled (~18Hz & >2px movement) so file slabs turn smoothly with minimal raycast cost
         if (onDesk && !onIcon) {
-          updateHoverRaycast(cx, cy);
+          const nowMs = performance.now();
+          const dHx = cx - lastWpHoverX;
+          const dHy = cy - lastWpHoverY;
+          if ((nowMs - lastWpHoverRaycastMs) >= 55 && (dHx * dHx + dHy * dHy) > 4.0) {
+            lastWpHoverRaycastMs = nowMs;
+            lastWpHoverX = cx;
+            lastWpHoverY = cy;
+            updateHoverRaycast(cx, cy);
+          }
         } else {
           hoveredItem = null;
           isMouseNearCore = false;
+          lastWpHoverX = -9999;
+          lastWpHoverY = -9999;
         }
       }
 
@@ -8378,7 +8448,34 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         } catch (err) { /* ignore */ }
       }
 
+      let wpActionInFlight = false;
+      let wpActionSafetyTimer = null;
+
+      function setWallpaperButtonsBusy(busy) {
+        wpActionInFlight = Boolean(busy);
+        if (wpActionSafetyTimer) {
+          clearTimeout(wpActionSafetyTimer);
+          wpActionSafetyTimer = null;
+        }
+        if (wpActionInFlight) {
+          wpActionSafetyTimer = setTimeout(function () {
+            wpActionSafetyTimer = null;
+            setWallpaperButtonsBusy(false);
+          }, 20000);
+        }
+        const ids = ['btn-enable-wallpaper', 'btn-disable-wallpaper'];
+        for (let i = 0; i < ids.length; i++) {
+          const el = document.getElementById(ids[i]);
+          if (!el) continue;
+          el.disabled = wpActionInFlight;
+          el.style.opacity = wpActionInFlight ? '0.55' : '';
+          el.style.pointerEvents = wpActionInFlight ? 'none' : '';
+        }
+      }
+
       function requestWallpaperAction(action, wpModeOverride) {
+        if (wpActionInFlight) return;
+        setWallpaperButtonsBusy(true);
         const chosenMode = wpModeOverride || wallpaperUiState.wallpaperMode || 'agy_live';
         wallpaperUiState.wallpaperMode = chosenMode;
         const chosenBeam = chosenMode === 'ambient_eco' ? 'ambient' : (state.beamMode === 'tool_io' ? 'ambient' : (state.beamMode || 'ambient'));
@@ -8401,17 +8498,26 @@ Click patterned eye on outer ring to open file or file location.</textarea>
           : 'http://127.0.0.1:18791';
 
         function sendWpPost() {
+          const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+          const abortTimer = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (err) { /* ignore */ } }, 18000) : null;
           return fetch(baseHttp + '/api/wallpaper', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(reqBody)
-          }).then(function (r) { return r.json(); });
+            body: JSON.stringify(reqBody),
+            signal: ctrl ? ctrl.signal : undefined
+          }).then(function (r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+          }).finally(function () {
+            if (abortTimer) clearTimeout(abortTimer);
+          });
         }
 
         function onWpRes(res) {
+          setWallpaperButtonsBusy(false);
           updateWallpaperStatusUI(res);
           if (!activeLocalWS || activeLocalWS.readyState !== 1) {
-            window.ophanimAgent.connectWS('ws://127.0.0.1:18791/ws');
+            window.ophanimAgent.connectWS('ws://127.0.0.1:18791/ws', { allowAutoReconnect: true });
           }
           if (res && res.ok) {
             if (action === 'enable') {
@@ -8430,8 +8536,9 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         }
 
         sendWpPost().then(onWpRes).catch(function () {
-          if (activeLocalWS && activeLocalWS.readyState === 1) {
-            activeLocalWS.send(JSON.stringify(reqBody));
+          if (window.location.protocol !== 'file:') {
+            setWallpaperButtonsBusy(false);
+            showToast('壁纸提示：本地壁纸宿主请求失败或超时，请稍后重试');
             return;
           }
           // Attempt automatic silent wake via registered `ophanim-toy-wp://` protocol (works immediately if Ophanim_Wallpaper_Toy.bat ran once!)
@@ -8451,7 +8558,9 @@ Click patterned eye on outer ring to open file or file location.</textarea>
                   window.__ophanimToyWpPollTimer = null;
                 }
                 showToast('WALLPAPER // 已连接本地壁纸宿主，正在嵌入桌面图标底层...');
-                return sendWpPost().then(onWpRes);
+                return sendWpPost().then(onWpRes).catch(function () {
+                  setWallpaperButtonsBusy(false);
+                });
               })
               .catch(function () {
                 if (tries === 18 && !shownFirstRunGuide) {
@@ -8461,6 +8570,7 @@ Click patterned eye on outer ring to open file or file location.</textarea>
                 if (tries >= 240 && window.__ophanimToyWpPollTimer) {
                   clearInterval(window.__ophanimToyWpPollTimer);
                   window.__ophanimToyWpPollTimer = null;
+                  setWallpaperButtonsBusy(false);
                 }
               })
               .finally(function () {
@@ -8717,13 +8827,33 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         deliverCore: function (file, fullPath, code) {
           window.ophanimAgent.deliverEye(file, fullPath, code);
         },
-        connectWS: function (wsUrl) {
+        connectWS: function (wsUrl, opts) {
           if (!wsUrl) return;
+          const isStandaloneFile = (window.location.protocol === 'file:' && !IS_WALLPAPER_MODE);
+          const allowAutoReconnect = (opts && typeof opts.allowAutoReconnect === 'boolean')
+            ? opts.allowAutoReconnect
+            : !isStandaloneFile;
+          let finalWsUrl = wsUrl;
+          if (IS_WALLPAPER_MODE && finalWsUrl.indexOf('wallpaper=1') === -1) {
+            finalWsUrl += (finalWsUrl.indexOf('?') === -1 ? '?wallpaper=1' : '&wallpaper=1');
+          }
+          if (window.__ophanimWsReconnectTimer) {
+            clearTimeout(window.__ophanimWsReconnectTimer);
+            window.__ophanimWsReconnectTimer = null;
+          }
           try {
-            if (activeLocalWS) activeLocalWS.close();
-            const sock = new WebSocket(wsUrl);
+            if (activeLocalWS) {
+              const prevSock = activeLocalWS;
+              activeLocalWS = null;
+              try { prevSock.close(); } catch (err) { /* ignore */ }
+            }
+            const sock = new WebSocket(finalWsUrl);
             activeLocalWS = sock;
+            let openedThisSock = false;
             sock.addEventListener('open', function () {
+              openedThisSock = true;
+              window.__ophanimWsEverConnected = true;
+              window.__ophanimWsReconnectAttempt = 0;
               streamBadge.textContent = state.autoSim ? 'AUTO·ON' : 'TOY·WP';
               pushEventLog('✦ WP_READY', '127.0.0.1:18791', 'WALLPAPER_HOST');
               if (IS_WALLPAPER_MODE) {
@@ -8736,6 +8866,18 @@ Click patterned eye on outer ring to open file or file location.</textarea>
             sock.addEventListener('message', function (msg) {
               try {
                 const payload = JSON.parse(msg.data);
+                if (payload && payload.type === 'wp_visibility') {
+                  wpOccluded = Boolean(payload.occluded);
+                  if (wpOccluded) pauseRenderLoopIfNeeded();
+                  else resumeRenderLoopIfNeeded();
+                  return;
+                }
+                if (payload && payload.type === 'wp_vis') {
+                  wpOccluded = (payload.visible === false);
+                  if (wpOccluded) pauseRenderLoopIfNeeded();
+                  else resumeRenderLoopIfNeeded();
+                  return;
+                }
                 if (payload && payload.type === 'wp_ptr') {
                   handleWallpaperPointer(payload);
                   return;
@@ -8745,6 +8887,7 @@ Click patterned eye on outer ring to open file or file location.</textarea>
                   return;
                 }
                 if (payload && payload.type === 'ophanim_wallpaper_status') {
+                  setWallpaperButtonsBusy(false);
                   updateWallpaperStatusUI(payload);
                   return;
                 }
@@ -8775,9 +8918,20 @@ Click patterned eye on outer ring to open file or file location.</textarea>
             sock.addEventListener('close', function () {
               if (activeLocalWS === sock) {
                 activeLocalWS = null;
-                setTimeout(function () {
-                  if (!activeLocalWS) window.ophanimAgent.connectWS(wsUrl);
-                }, 2600);
+                // In standalone file:// mode with no running host, stop auto-retry loop until user triggers wallpaper action
+                if (isStandaloneFile && !allowAutoReconnect && !openedThisSock && !window.__ophanimWsEverConnected) {
+                  return;
+                }
+                const attempt = Number(window.__ophanimWsReconnectAttempt || 0);
+                window.__ophanimWsReconnectAttempt = attempt + 1;
+                const baseDelay = Math.min(30000, 1200 * Math.pow(2, Math.min(attempt, 5)));
+                const jitterDelay = Math.round(baseDelay * (0.8 + Math.random() * 0.4));
+                window.__ophanimWsReconnectTimer = setTimeout(function () {
+                  window.__ophanimWsReconnectTimer = null;
+                  if (!activeLocalWS) {
+                    window.ophanimAgent.connectWS(finalWsUrl, { allowAutoReconnect: allowAutoReconnect || Boolean(window.__ophanimWsEverConnected) });
+                  }
+                }, jitterDelay);
               }
             });
           } catch (err) { /* ignore */ }
@@ -9125,6 +9279,8 @@ Click patterned eye on outer ring to open file or file location.</textarea>
       }
 
       window.addEventListener('resize', function () {
+        dpr = computeTargetDpr();
+        renderer.setPixelRatio(dpr);
         camera.aspect = window.innerWidth / window.innerHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(window.innerWidth, window.innerHeight);
@@ -9957,13 +10113,23 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         syncOrnamentalDeckOrientation();
       }
 
-      // Auto-connect to local Antigravity Bridge WebSocket (works both via ?ws=... AND direct file:/// double-click!)
+      // Auto-connect to local Wallpaper Host WebSocket (in standalone file:// mode, probe once without retry loop until user clicks wallpaper action)
       (function checkQueryWS() {
         try {
           const params = new URLSearchParams(window.location.search);
+          const explicitWs = params.get('ws');
+          if (explicitWs) {
+            window.ophanimAgent.connectWS(explicitWs, { allowAutoReconnect: true });
+            return;
+          }
+          if (window.location.protocol === 'file:' && !IS_WALLPAPER_MODE) {
+            fetch('http://127.0.0.1:18791/api/health', { method: 'GET', cache: 'no-store' })
+              .then(function (r) { if (r.ok) window.ophanimAgent.connectWS('ws://127.0.0.1:18791/ws', { allowAutoReconnect: true }); })
+              .catch(function () { /* standalone file:// preview: host not running, stay idle until user clicks wallpaper action */ });
+            return;
+          }
           const defaultWs = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + (window.location.host || '127.0.0.1:18791') + '/ws';
-          const wsParam = params.get('ws') || (window.location.protocol === 'file:' ? 'ws://127.0.0.1:18791/ws' : defaultWs);
-          if (wsParam) window.ophanimAgent.connectWS(wsParam);
+          if (defaultWs) window.ophanimAgent.connectWS(defaultWs, { allowAutoReconnect: true });
         } catch (err) { /* ignore */ }
       })();
 
@@ -10380,7 +10546,23 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         fluxWaveCtx.restore();
       }
 
+      let hudCanvasClearedInWallpaper = false;
+
       function drawSpatialHud(dt) {
+        if (IS_WALLPAPER_MODE) {
+          const hasActiveWpHud = Boolean(
+            state.topologyOverlay &&
+            ((hoveredItem && hoveredItem.anchor) || hudReticleAlpha > 0.02 || (camCtrl.isDragging && camCtrl.dragMode === 'drag_ring' && camCtrl.draggedRingInfo))
+          );
+          if (!hasActiveWpHud) {
+            if (!hudCanvasClearedInWallpaper) {
+              hudCtx.clearRect(0, 0, hudCanvas.width, hudCanvas.height);
+              hudCanvasClearedInWallpaper = true;
+            }
+            return;
+          }
+          hudCanvasClearedInWallpaper = false;
+        }
         hudCtx.clearRect(0, 0, hudCanvas.width, hudCanvas.height);
         if (!state.topologyOverlay || state.bootPhase === 'dormant' || (state.bootPhase === 'awakening' && state.bootTime < 1.55)) return;
 
@@ -10593,20 +10775,30 @@ Click patterned eye on outer ring to open file or file location.</textarea>
       }
 
       let smoothedHoverBrake = 1.0;
-      let lastMs = performance.now();
-      let lastEcoRenderMs = 0;
+      lastMs = performance.now();
+      lastEcoRenderMs = 0;
       let masterPhaseDeg = 0;
       let autoCycleStep = 0;
 
       pushEventLog('✦ READY', 'system_idle', 'ONLINE');
 
       function animate(nowMs) {
-        requestAnimationFrame(animate);
-        if (IS_WALLPAPER_ECO && !camCtrl.isDragging && !hoveredItem && (nowMs - lastEcoRenderMs) < 23.5) {
+        if (shouldPauseRenderLoop()) {
+          animateRafId = null;
           return;
         }
+        animateRafId = requestAnimationFrame(animate);
+        if (IS_WALLPAPER_MODE) {
+          const isInteracting = Boolean(camCtrl.isDragging || hoveredItem);
+          const minFrameMs = IS_WALLPAPER_ECO
+            ? (isInteracting ? 32.0 : 48.0)
+            : (isInteracting ? 16.0 : 32.0);
+          if ((nowMs - lastEcoRenderMs) < minFrameMs) {
+            return;
+          }
+        }
         lastEcoRenderMs = nowMs;
-        const dt = Math.min(0.05, (nowMs - lastMs) * 0.001);
+        const dt = Math.min(0.05, Math.max(0.0, (nowMs - lastMs) * 0.001));
         lastMs = nowMs;
         state.elapsed += dt;
 
@@ -11423,61 +11615,65 @@ Click patterned eye on outer ring to open file or file location.</textarea>
         renderer.render(scene, camera);
         drawSpatialHud(dt);
 
-        // Sample time-series charts smoothly
-        const avgYawDeg = (sumYaw / Math.max(1, visGazeEyeCount)) * 57.2958;
-        const avgPitchDeg = (sumPitch / Math.max(1, visGazeEyeCount)) * 57.2958;
+        if (!IS_WALLPAPER_MODE) {
+          // Sample time-series charts smoothly
+          const avgYawDeg = (sumYaw / Math.max(1, visGazeEyeCount)) * 57.2958;
+          const avgPitchDeg = (sumPitch / Math.max(1, visGazeEyeCount)) * 57.2958;
 
-        if (state.elapsed >= nextChartSampleAt) {
-          nextChartSampleAt = state.elapsed + 0.14;
-          const normFlux = Math.min(1.0, activeBeams / 16.0);
-          fluxHistory.push(normFlux);
-          if (fluxHistory.length > 64) fluxHistory.shift();
+          if (state.elapsed >= nextChartSampleAt) {
+            nextChartSampleAt = state.elapsed + 0.14;
+            const normFlux = Math.min(1.0, activeBeams / 16.0);
+            fluxHistory.push(normFlux);
+            if (fluxHistory.length > 64) fluxHistory.shift();
 
-          gazeWaveHistory.push(Math.max(-1, Math.min(1, (avgYawDeg + avgPitchDeg * 0.6) / 42.0)));
-          if (gazeWaveHistory.length > 64) gazeWaveHistory.shift();
+            gazeWaveHistory.push(Math.max(-1, Math.min(1, (avgYawDeg + avgPitchDeg * 0.6) / 42.0)));
+            if (gazeWaveHistory.length > 64) gazeWaveHistory.shift();
 
-          if (!quotaTelemetry.externalOverride && state.autoSim) {
-            const swarmFactor = 1.0 + state.swarmCount * 0.35;
-            const instantBurn = (0.18 + normFlux * 0.55) * swarmFactor;
-            quotaTelemetry.burnRateTokPerSec = Math.round((860 + activeBeams * 185) * swarmFactor);
-            quotaTelemetry.peakTokPerSec = Math.max(quotaTelemetry.peakTokPerSec, quotaTelemetry.burnRateTokPerSec);
-            quotaTelemetry.rateHistory.push(quotaTelemetry.burnRateTokPerSec);
-            if (quotaTelemetry.rateHistory.length > 56) quotaTelemetry.rateHistory.shift();
-            pushSmoothVelocitySample(quotaTelemetry.burnRateTokPerSec, null);
-            quotaTelemetry.usedPct += instantBurn * 0.045;
-            if (quotaTelemetry.usedPct > 89.0) quotaTelemetry.usedPct = 24.5;
-            quotaTelemetry.history.push(quotaTelemetry.usedPct);
-            if (quotaTelemetry.history.length > 56) quotaTelemetry.history.shift();
+            if (!quotaTelemetry.externalOverride && state.autoSim) {
+              const swarmFactor = 1.0 + state.swarmCount * 0.35;
+              const instantBurn = (0.18 + normFlux * 0.55) * swarmFactor;
+              quotaTelemetry.burnRateTokPerSec = Math.round((860 + activeBeams * 185) * swarmFactor);
+              quotaTelemetry.peakTokPerSec = Math.max(quotaTelemetry.peakTokPerSec, quotaTelemetry.burnRateTokPerSec);
+              quotaTelemetry.rateHistory.push(quotaTelemetry.burnRateTokPerSec);
+              if (quotaTelemetry.rateHistory.length > 56) quotaTelemetry.rateHistory.shift();
+              pushSmoothVelocitySample(quotaTelemetry.burnRateTokPerSec, null);
+              quotaTelemetry.usedPct += instantBurn * 0.045;
+              if (quotaTelemetry.usedPct > 89.0) quotaTelemetry.usedPct = 24.5;
+              quotaTelemetry.history.push(quotaTelemetry.usedPct);
+              if (quotaTelemetry.history.length > 56) quotaTelemetry.history.shift();
 
-            const remM = ((1.0 - quotaTelemetry.usedPct / 100.0) * 2.0).toFixed(2);
-            quotaUsedPctEl.textContent = quotaTelemetry.usedPct.toFixed(1) + '%';
-            quotaRemTokensEl.textContent = remM + 'M / 2.00M';
-            quotaRateLabelEl.textContent = formatTokPerSecLabel(quotaTelemetry.burnRateTokPerSec, quotaTelemetry.peakTokPerSec);
+              const remM = ((1.0 - quotaTelemetry.usedPct / 100.0) * 2.0).toFixed(2);
+              quotaUsedPctEl.textContent = quotaTelemetry.usedPct.toFixed(1) + '%';
+              quotaRemTokensEl.textContent = remM + 'M / 2.00M';
+              quotaRateLabelEl.textContent = formatTokPerSecLabel(quotaTelemetry.burnRateTokPerSec, quotaTelemetry.peakTokPerSec);
+            }
           }
+
+          if (state.ornamentalVisible) {
+            drawQuotaLineChart();
+            drawVelocitySpectrum(effSpeed);
+            drawLissajousScope(state.elapsed, effSpeed);
+            drawFluxAndGazeWave();
+
+            const g0 = ringAssemblies[1].gimbal.quaternion;
+            gyroQLabelEl.textContent = 'q=[' + g0.w.toFixed(2) + ', ' + g0.x.toFixed(2) + 'i]';
+            const sxSign = avgYawDeg >= 0 ? '+' : '';
+            const sySign = avgPitchDeg >= 0 ? '+' : '';
+            gazeAngleLabelEl.textContent = 'θ=(' + sxSign + Math.round(avgYawDeg) + '°, ' + sySign + Math.round(avgPitchDeg) + '°)';
+            quatValEl.textContent = String(loadedSlabCount).padStart(2, '0') + ' / ' + String(totalActiveSlabs).padStart(3, '0') + ' LOADED';
+            xwValEl.textContent = String(state.swarmCount).padStart(2, '0') + ' / ' + String(visibleStarTotal).padStart(2, '0') + ' STARS';
+            gazeValEl.textContent = String(activeDelivEyeCount).padStart(2, '0') + ' / ' + String(visOuterEyeSlots).padStart(2, '0') + ' SIGILS';
+            beamCountValEl.textContent = String(activeBeams).padStart(2, '0') + ' ACTIVE';
+          }
+
+          telPhase.textContent = masterPhaseDeg.toFixed(1).padStart(5, '0') + '°';
+          telDist.textContent = camCtrl.radius.toFixed(1) + ' CUBITS';
         }
-
-        if (state.ornamentalVisible) {
-          drawQuotaLineChart();
-          drawVelocitySpectrum(effSpeed);
-          drawLissajousScope(state.elapsed, effSpeed);
-          drawFluxAndGazeWave();
-
-          const g0 = ringAssemblies[1].gimbal.quaternion;
-          gyroQLabelEl.textContent = 'q=[' + g0.w.toFixed(2) + ', ' + g0.x.toFixed(2) + 'i]';
-          const sxSign = avgYawDeg >= 0 ? '+' : '';
-          const sySign = avgPitchDeg >= 0 ? '+' : '';
-          gazeAngleLabelEl.textContent = 'θ=(' + sxSign + Math.round(avgYawDeg) + '°, ' + sySign + Math.round(avgPitchDeg) + '°)';
-          quatValEl.textContent = String(loadedSlabCount).padStart(2, '0') + ' / ' + String(totalActiveSlabs).padStart(3, '0') + ' LOADED';
-          xwValEl.textContent = String(state.swarmCount).padStart(2, '0') + ' / ' + String(visibleStarTotal).padStart(2, '0') + ' STARS';
-          gazeValEl.textContent = String(activeDelivEyeCount).padStart(2, '0') + ' / ' + String(visOuterEyeSlots).padStart(2, '0') + ' SIGILS';
-          beamCountValEl.textContent = String(activeBeams).padStart(2, '0') + ' ACTIVE';
-        }
-
-        telPhase.textContent = masterPhaseDeg.toFixed(1).padStart(5, '0') + '°';
-        telDist.textContent = camCtrl.radius.toFixed(1) + ' CUBITS';
       }
 
-      requestAnimationFrame(animate);
+      if (!shouldPauseRenderLoop()) {
+        animateRafId = requestAnimationFrame(animate);
+      }
     })();
   </script>
 </body>
